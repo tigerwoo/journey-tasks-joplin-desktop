@@ -125,12 +125,12 @@ test('snapshot completed visibility follows local preference and explicit query 
   const { host, app, options } = await setup();
   const made = await app.dispatch({ action: 'createTask', requestId: 'completed-filter-create', input: { title: 'completed task', notebookId: 'book', schedule: schedule('2026-10-20') } });
   await app.dispatch({ action: 'complete', requestId: 'completed-filter-done', noteId: made.noteId! });
-  assert.equal((await app.snapshot({ view: 'today' })).items.length, 0);
-  assert.equal((await app.snapshot({ view: 'today', showCompleted: true })).items.length, 1);
+  assert.equal((await app.snapshot({ view: 'today', deviceZone: 'Asia/Shanghai' })).items.length, 0);
+  assert.equal((await app.snapshot({ view: 'today', deviceZone: 'Asia/Shanghai', showCompleted: true })).items.length, 1);
   await app.dispatch({ action: 'savePreferences', requestId: 'completed-filter-preference', preferences: { showCompleted: true, lastView: 'day' } });
   const restarted = new TaskApplication(host, options); await restarted.initialize();
-  assert.equal((await restarted.snapshot({ view: 'day', date: '2026-10-20' })).items.length, 1);
-  assert.equal((await restarted.snapshot({ view: 'day', date: '2026-10-20', showCompleted: false })).items.length, 0);
+  assert.equal((await restarted.snapshot({ view: 'day', deviceZone: 'Asia/Shanghai', date: '2026-10-20' })).items.length, 1);
+  assert.equal((await restarted.snapshot({ view: 'day', deviceZone: 'Asia/Shanghai', date: '2026-10-20', showCompleted: false })).items.length, 0);
   assert.equal(host.notes.size, 1);
 });
 

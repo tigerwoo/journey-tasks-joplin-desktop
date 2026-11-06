@@ -18,8 +18,9 @@ test('issue72 notebook shortcut opens all tasks including undated tasks and repl
   host.notebooks.set('child', { id: 'child', title: 'Child', parent_id: 'book' });
   host.notebooks.set('other', { id: 'other', title: 'Other' });
   const app = new TaskApplication(host); await app.initialize();
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   for (const [title, notebookId, schedule] of [
-    ['Dated', 'book', { kind: 'allDay', date: timezoneAdapter.localDate(Date.now(), 'UTC'), zone: 'UTC' }],
+    ['Dated', 'book', { kind: 'allDay', date: timezoneAdapter.localDate(Date.now(), zone), zone }],
     ['Undated', 'book', { kind: 'none' }],
     ['Child task', 'child', { kind: 'none' }],
     ['Unrelated', 'other', { kind: 'none' }],
