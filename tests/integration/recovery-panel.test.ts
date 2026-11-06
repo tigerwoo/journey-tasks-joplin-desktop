@@ -47,6 +47,9 @@ for (const failure of ['missing-first', 'damaged-template'] as const) test(`${fa
     await act(async () => { renderer = create(React.createElement(App)); });
     assert.equal(renderer!.root.findAllByProps({ role: 'dialog' }).length, 0);
     assert.equal(renderer!.root.findAllByProps({ className: 'warning' }).length, failure === 'missing-first' ? 0 : 1);
+    for (const warning of renderer!.root.findAllByProps({ className: 'warning' })) {
+      assert.equal(warning.findAllByType('button').length, 0, 'diagnostics must recover automatically without manual action buttons');
+    }
     assert.doesNotMatch(text(renderer!.root), /查看系列|重试生成下一期|重新读取同步数据/);
     const list = renderer!.root.findAllByType(TaskList).find(list => list.props.items.some((item: any) => item.kind === 'actual' && !item.historical))!;
     const current = list.props.items.find((item: any) => item.kind === 'actual' && !item.historical);

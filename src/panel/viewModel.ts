@@ -74,7 +74,7 @@ export function dayTimelineGroups(items: readonly PreviewItem[]) {
   for (const row of rows) {
     const previous = groups[groups.length - 1];
     if (previous && row.top < previous.top + previous.height) {
-      previous.height = row.top + 40 - previous.top;
+      previous.height = (row.top - previous.top) + 40;
       previous.items.push(row.item);
     } else groups.push({top: row.top, height: 40, items: [row.item]});
   }
