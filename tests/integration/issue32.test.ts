@@ -35,26 +35,27 @@ for (const entry of ['create','convert'] as const) for (const mode of ['archive'
   for(const note of host.notes.values()) assert.equal(note.title,'新名称');
   assert.equal(host.notes.get(b.carrierNoteId)!.body,bBody);
   series=(await app.snapshot()).series[0]!;
-  const revised=await app.dispatch({action:'reviseSeries',requestId:'backdate',seriesId:made.seriesId!,revisionId:series.definition!.revisionId,definition:{...series.definition!,anchor:date('2026-10-12')},currentSchedule:date('2026-10-12')});
+  // Backdate this occurrence independently; the series anchor must stay after history.
+  const revised=await app.dispatch({action:'reviseSeries',requestId:'backdate',seriesId:made.seriesId!,revisionId:series.definition!.revisionId,definition:series.definition!,currentSchedule:date('2026-10-12')});
   assert.equal(revised.status,'saved',revised.message);
   for(const modeNow of ['continuous','archive'] as const) {
     series=(await app.snapshot()).series[0]!;
     await app.dispatch({action:'switchMode',requestId:'mode-'+modeNow,seriesId:made.seriesId!,revisionId:series.definition!.revisionId,mode:modeNow});
-    assert.equal(current((await app.snapshot()).series[0]!).scheduled.date,'2026-10-12');
+    assert.equal(current((await app.snapshot()).series[0]!).deferred?.date,'2026-10-12');
   }
   await app.dispatch({action:'editTask',requestId:'same-reminder',noteId:b.carrierNoteId,patch:{title:'新名称',reminder:{enabled:false}}});
-  assert.equal(current((await app.snapshot()).series[0]!).scheduled.date,'2026-10-12');
+  assert.equal(current((await app.snapshot()).series[0]!).deferred?.date,'2026-10-12');
   const abandoned=await app.dispatch({action:'abandonTask',requestId:'abandon',noteId:b.carrierNoteId});assert.equal(abandoned.status,'saved',abandoned.message);
   series=(await app.snapshot()).series[0]!;
-  assert.equal(series.occurrences.find(o=>o.occurrenceId===b.occurrenceId)!.scheduled.date,'2026-10-12');
+  assert.equal(series.occurrences.find(o=>o.occurrenceId===b.occurrenceId)!.deferred?.date,'2026-10-12');
   assert.equal(series.occurrences.find(o=>o.occurrenceId===b.occurrenceId)!.resolution,'skipped');
-  assert.equal(current(series).scheduled.date,'2026-10-19');
+  assert.equal(current(series).scheduled.date,'2026-11-09');
   assert.equal(series.anchorNoteId,made.noteId);
   const restarted=makeApp();await restarted.initialize();
   const after=await restarted.snapshot({view:'month',date:'2026-10-12',showCompleted:true});
   assert.equal(after.series[0]!.title,'新名称');
   assert.ok(after.items.some(i=>i.date==='2026-10-12'&&i.completed&&i.resolution==='skipped'));
-  assert.equal(current(after.series[0]!).scheduled.date,'2026-10-19');
+  assert.equal(current(after.series[0]!).scheduled.date,'2026-11-09');
   assert.equal(host.notes.get(b.carrierNoteId)!.body,bBody);
 });
 test('planned catch-up advances exactly one week per action, completion-based rule uses handling date', async () => {
@@ -121,7 +122,7 @@ test('archive to continuous preserves first anchor; a missing first note blocks 
   s=(await app.snapshot()).series[0]!;assert.equal(s.anchorNoteId,made.noteId);
   const root=structuredClone(host.notes.get(made.noteId!)!);host.notes.delete(made.noteId!);
   await app.dispatch({action:'refresh',requestId:'missing'});
-  assert.equal((await app.snapshot()).series[0]!.status,'waiting');
+  assert.equal((await app.snapshot()).series.length,0);
   assert.equal(host.notes.size,1);
   host.notes.set(made.noteId!,root);await app.dispatch({action:'refresh',requestId:'restore'});
   assert.equal((await app.snapshot()).series[0]!.anchorNoteId,made.noteId);

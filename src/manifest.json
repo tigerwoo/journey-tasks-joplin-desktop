@@ -5,7 +5,7 @@
   "platforms": [
     "desktop"
   ],
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "Journey Tasks",
   "description": "Task lists and calendars for native Joplin to-dos with Gregorian and Chinese lunar recurrence.",
   "author": "tigerwoo",

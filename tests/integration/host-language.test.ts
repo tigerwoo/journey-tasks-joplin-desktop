@@ -28,7 +28,8 @@ test('host command labels use the selected language on startup and language does
   host.views = { panels: { create: async () => 'panel', setHtml: async () => {}, addScript: async () => {}, onMessage: async () => {}, postMessage() {}, show: async () => {} } };
   const runtime = await startPlugin(host);
   try {
-    assert.equal(commands.length, 8);
+    assert.equal(commands.length, 14);
+    assert.equal(commands.find(c => c.name === 'journey.toggleTasks')?.label, 'Journey: Show/hide tasks');
     assert.equal(commands.find(c => c.name === 'journey.abandonSelected')?.label, 'Journey: Abandon selected task');
     assert.ok(commands.some(c => c.name === 'journey.newTask' && /new task/i.test(c.label)));
     assert.ok(commands.every(c => !/[\u3400-\u9fff]/.test(c.label)));

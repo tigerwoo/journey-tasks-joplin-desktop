@@ -17,7 +17,7 @@ function setup() {
     recurrence: { calendar: 'gregorian', frequency: 'daily', interval: 1, basis: 'scheduled', end: { kind: 'never' } } });
   return { host, app, input, makeApp, notices, day: (day: number) => { now = Date.parse(`2026-10-${day}T04:00:00Z`); } };
 }
-for (const mode of ['archive', 'continuous'] as const) test(`${mode}: latest undo withdraws successor, redo reuses content across restart`, async () => {
+for (const mode of ['archive', 'continuous'] as const) test(`${mode}: latest undo preserves successor, redo reuses content across restart`, async () => {
   const { host, app, input, makeApp, notices } = setup(); await app.initialize();
   const created = await app.dispatch({ action: 'createTask', requestId: 'create', input: input(mode) });
   const original = (await app.snapshot()).series[0]!.activeOccurrenceId!;
@@ -27,11 +27,11 @@ for (const mode of ['archive', 'continuous'] as const) test(`${mode}: latest und
   await host.data.put(['notes', next.carrierNoteId], {}, { body: '用户在下一期修改的内容' });
   const undo = await app.dispatch({ action: 'reopen', requestId: 'undo', seriesId: created.seriesId, occurrenceId: original }); assert.equal(undo.status, 'saved', undo.message);
   const snapshot = await app.snapshot({ view: 'month', date: '2026-10-28' });
-  assert.equal(snapshot.series[0]!.activeOccurrenceId, original);
-  assert.equal(snapshot.series[0]!.consumedCount, 0);
-  assert.ok(snapshot.items.some(i => i.kind === 'projected' && i.date === '2026-10-29'));
-  assert.equal(snapshot.tasks.filter(t => !t.completedAt).length, 1);
-  assert.equal(host.notes.get(next.carrierNoteId)!.todo_due, mode === 'archive' ? 0 : host.notes.get(created.noteId!)!.todo_due);
+  assert.equal(snapshot.series[0]!.activeOccurrenceId, next.occurrenceId);
+  assert.equal(snapshot.series[0]!.consumedCount, 1);
+  assert.ok(snapshot.items.some(i => i.kind === 'actual' && i.date === '2026-10-29'));
+  assert.equal(snapshot.tasks.filter(t => !t.completedAt && !t.historical).length, 1);
+  assert.ok(host.notes.get(next.carrierNoteId)!.todo_due);
   assert.equal(host.notes.get(next.carrierNoteId)!.body, '用户在下一期修改的内容');
   const restarted = makeApp(); await restarted.initialize();
   const redo = await restarted.dispatch({ action: 'complete', requestId: 'redo', seriesId: created.seriesId, occurrenceId: original });
@@ -84,7 +84,7 @@ for (const mode of ['archive', 'continuous'] as const) test(`${mode}: future com
   assert.ok(!corrected.warnings.includes(notices[0]!));
   await app.dispatch({ action: 'refresh', requestId: 'refresh-again' }); assert.equal(notices.length, 1);
 });
-test('older history undo and redo do not rewind current; native latest undo does', async () => {
+test('older history undo and redo do not rewind current; native latest undo also preserves it', async () => {
   const { host, app, input, day } = setup(); await app.initialize();
   const created = await app.dispatch({ action: 'createTask', requestId: 'create', input: input() });
   const a = (await app.snapshot()).series[0]!.activeOccurrenceId!;
@@ -99,7 +99,7 @@ test('older history undo and redo do not rewind current; native latest undo does
   const note = (await app.snapshot()).series[0]!.occurrences.find(o => o.occurrenceId === b)!.carrierNoteId;
   await host.data.put(['notes', note], {}, { todo_completed: 0 });
   await app.dispatch({ action: 'refresh', requestId: 'native-undo' });
-  assert.equal((await app.snapshot()).series[0]!.activeOccurrenceId, b);
+  assert.equal((await app.snapshot()).series[0]!.activeOccurrenceId, c);
 });
 test('changing current date preserves rule; abandonment and configuration preserve body', async () => {
   const { host, app, input } = setup(); await app.initialize();
@@ -131,37 +131,39 @@ test('ordinary future task cannot complete until its date is explicitly changed'
   await app.dispatch({ action: 'changeDate', requestId: 'date', noteId: created.noteId!, schedule: input().schedule });
   assert.equal((await app.dispatch({ action: 'complete', requestId: 'done', noteId: created.noteId! })).status, 'saved');
 });
-test('new rule preserves current schedule, body and historical dates while updating future previews', async () => {
+test('explicit current date preserves the period while new rules update future previews', async () => {
   const { host, app, input } = setup(); await app.initialize();
   const created = await app.dispatch({ action: 'createTask', requestId: 'create', input: input() });
   await app.dispatch({ action: 'complete', requestId: 'done', seriesId: created.seriesId });
   const series = (await app.snapshot()).series[0]!, current = series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!;
   const body = host.notes.get(current.carrierNoteId)!.body;
   const revised = await app.dispatch({ action: 'reviseSeries', requestId: 'revise', seriesId: created.seriesId!, revisionId: series.definition!.revisionId,
-    definition: { ...series.definition!, anchor: current.scheduled, rule: { ...series.definition!.rule, frequency: 'weekly', weekdays: [1] } } });
+    currentSchedule: current.scheduled, definition: { ...series.definition!, anchor: current.scheduled, rule: { ...series.definition!.rule, frequency: 'weekly', weekdays: [1] } } });
   assert.equal(revised.status, 'saved', revised.message);
   const after = await app.snapshot({ view: 'month', date: '2026-11-02' });
-  assert.equal(after.series[0]!.occurrences.find(o => o.occurrenceId === current.occurrenceId)!.scheduled.date, '2026-10-29');
+  assert.equal(after.series[0]!.occurrences.find(o => o.occurrenceId === current.occurrenceId)!.scheduled.date, '2026-11-02');
+  assert.equal(after.series[0]!.occurrences.find(o => o.occurrenceId === current.occurrenceId)!.deferred?.date, '2026-10-29');
   assert.equal(after.series[0]!.occurrences[0]!.scheduled.date, '2026-10-28');
-  assert.ok(after.items.some(i => i.kind === 'projected' && i.date === '2026-11-02'));
+  assert.ok(!after.items.some(i => i.kind === 'projected' && i.date === '2026-11-02'));
   assert.ok(after.items.some(i => i.kind === 'projected' && i.date === '2026-11-09'));
   assert.equal(host.notes.get(current.carrierNoteId)!.body, body);
 });
-test('lost acknowledgement of rewind survives restart without reactivating successor', async () => {
+test('lost acknowledgement of reopening preserves successor across restart', async () => {
   const { host, app, input, makeApp } = setup(); await app.initialize();
   const created = await app.dispatch({ action: 'createTask', requestId: 'create', input: input() });
   const a = (await app.snapshot()).series[0]!.activeOccurrenceId!;
   await app.dispatch({ action: 'complete', requestId: 'done', seriesId: created.seriesId });
   const set = host.data.userDataSet; let failed = false;
-  host.data.userDataSet = async (type, id, key, value) => { await set(type, id, key, value); if (!failed && (value as any)?.kind === 'RewindAdvance') { failed = true; throw new Error('lost rewind acknowledgement'); } };
+  host.data.userDataSet = async (type, id, key, value) => { await set(type, id, key, value); if (!failed && (value as any)?.kind === 'ActOccurrence' && (value as any)?.payload?.action === 'reopen') { failed = true; throw new Error('lost rewind acknowledgement'); } };
   await app.dispatch({ action: 'reopen', requestId: 'undo', seriesId: created.seriesId, occurrenceId: a });
   const restarted = makeApp(); await restarted.initialize();
   const after = await restarted.snapshot();
-  assert.equal(after.series[0]!.activeOccurrenceId, a);
+  assert.notEqual(after.series[0]!.activeOccurrenceId, a);
+  assert.equal(after.series[0]!.consumedCount, 1);
   assert.equal(after.series[0]!.occurrences.find(o => o.occurrenceId === a)!.resolution, 'open');
   assert.equal(host.notes.size, 2);
 });
-test('successive latest undos can rewind two periods without losing preserved notes', async () => {
+test('successive history undos preserve current period and notes', async () => {
   const { host, app, input, day } = setup(); await app.initialize();
   const created = await app.dispatch({ action: 'createTask', requestId: 'create', input: input() });
   const a = (await app.snapshot()).series[0]!.activeOccurrenceId!;
@@ -172,8 +174,9 @@ test('successive latest undos can rewind two periods without losing preserved no
   const undo = await app.dispatch({ action: 'reopen', requestId: 'undo-a', seriesId: created.seriesId, occurrenceId: a });
   assert.equal(undo.status, 'saved', undo.message);
   const snapshot = await app.snapshot();
-  assert.equal(snapshot.series[0]!.status, 'active'); assert.equal(snapshot.series[0]!.activeOccurrenceId, a);
-  assert.equal(snapshot.series[0]!.consumedCount, 0); assert.equal(host.notes.size, 3);
+  assert.equal(snapshot.series[0]!.status, 'active'); assert.notEqual(snapshot.series[0]!.activeOccurrenceId, a);
+  assert.notEqual(snapshot.series[0]!.activeOccurrenceId, b);
+  assert.equal(snapshot.series[0]!.consumedCount, 2); assert.equal(host.notes.size, 3);
 });
 test('continuous historical result edits never write the shared current carrier', async () => {
   const { host, app, input, day } = setup(); await app.initialize();

@@ -120,7 +120,7 @@ test('templates reject attachments and image/data content, but permit a regular 
   assert.ok(host.resources.has(resourceId), 'rejecting template attachments must never delete user resources');
 });
 
-test('missing first task saves follower completion and pending evidence without generating or recreating the anchor; explicit retry is idempotent', async () => {
+test('missing first task saves follower completion and resumes automatically once without recreating the anchor', async () => {
   const { host, app, options, setTime } = setup(); await app.initialize();
   const made = await app.dispatch({ action: 'createTask', requestId: 'missing-root-series', input: input(true) });
   const rootId = made.noteId!;
@@ -154,7 +154,7 @@ test('missing first task saves follower completion and pending evidence without 
 
   host.notes.set(rootId, savedRoot);
   await pendingRestart.dispatch({ action: 'refresh', requestId: 'root-restored-not-yet-retried' });
-  assert.equal(host.notes.size, 2, 'restoration and refresh alone do not consume the pending completion');
+  assert.equal(host.notes.size, 3, 'restoration and refresh automatically consume the pending completion once');
   const retry = await pendingRestart.dispatch({ action: 'retrySeries', requestId: 'retry-pending', seriesId: made.seriesId!, noteId: follower.carrierNoteId });
   assert.equal(retry.status, 'saved', retry.message);
   assert.equal(host.notes.size, 3);
@@ -247,11 +247,10 @@ test('pending import acknowledgement lost after archive advancement retries with
   assert.equal(saved.code, 'ANCHOR_MISSING_PENDING');
   const pending = Object.entries(namespace(host, current.carrierNoteId)).find(([key]) => key.startsWith('v3:pending:'))![1].v;
   host.notes.set(made.noteId!, root);
-  await app.dispatch({ action: 'refresh', requestId: 'pending-ack-restored' });
   host.failNext('userDataSet', `${current.carrierNoteId}/v3:pending-imported:${pending.pendingId}`);
-  const interrupted = await app.dispatch({ action: 'retrySeries', requestId: 'pending-ack-failure', seriesId: made.seriesId!, noteId: current.carrierNoteId });
-  assert.notEqual(interrupted.status, 'saved');
-  const retry = await app.dispatch({ action: 'retrySeries', requestId: 'pending-ack-retry', seriesId: made.seriesId!, noteId: current.carrierNoteId });
+  await app.dispatch({ action: 'refresh', requestId: 'pending-ack-failure' });
+  assert.ok((await app.snapshot()).diagnostics.some(item => item.seriesId === made.seriesId));
+  const retry = await app.dispatch({ action: 'refresh', requestId: 'pending-ack-retry' });
   assert.equal(retry.status, 'saved', retry.message);
   const count = host.notes.size;
   assert.equal((await app.snapshot()).series[0]!.consumedCount, 2);

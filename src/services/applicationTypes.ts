@@ -26,6 +26,7 @@ export interface SeriesSummary {
   definition?: SeriesDefinition;
   revisionChoices: SeriesDefinition[];
   revisionIds: string[];
+  advanceChoices?: { opId: string; date: string; noteId: string; title: string }[];
   activeOccurrenceId?: string;
   consumedCount: number;
   occurrences: Occurrence[];
@@ -34,6 +35,7 @@ export interface SeriesSummary {
   warningCode?: string;
   anchorNoteId?: string;
   pendingCompletion?: boolean;
+  resumeUnavailable?: boolean;
 }
 export interface ApplicationDiagnostic { code: string; message: string; seriesId?: string; noteId?: string }
 export interface ApplicationSnapshot extends ViewSnapshot {
@@ -50,6 +52,7 @@ export interface ApplicationSnapshot extends ViewSnapshot {
   diagnostics: ApplicationDiagnostic[];
   loading: boolean;
 }
+export interface RestoreFirstTarget { noteId: string; seriesId: string; convert?: boolean }
 interface CommandBase { requestId: string; expectedSnapshotVersion?: number }
 export type ApplicationCommand = CommandBase & (
   | { action: 'createTask'; input: TaskInput }
@@ -63,8 +66,10 @@ export type ApplicationCommand = CommandBase & (
   | { action: 'reviseSeries'; seriesId: string; revisionId: string; definition: SeriesDefinition; currentSchedule?: DatedSchedule; moveSeries?: boolean }
   | { action: 'resolveConflict'; seriesId: string; definition: SeriesDefinition; revisionIds: string[]; currentSchedule?: DatedSchedule }
   | { action: 'switchMode'; seriesId: string; revisionId: string; mode: TaskMode }
-  | { action: 'deleteTask'; noteId: string; seriesId?: string; scope?: 'stop' | 'current' | 'series' | 'history' }
-  | { action: 'restoreSeries'; seriesId: string; targetOpIds: string[] }
+  | { action: 'deleteTask'; noteId: string; seriesId?: string; scope?: 'stop' | 'history' }
+  | { action: 'keepOccurrence'; seriesId: string; opId: string }
+  | { action: 'dismissDetached'; seriesId: string; noteId: string }
+  | ({ action: 'restoreFirstNote' } & RestoreFirstTarget)
   | { action: 'retrySeries'; seriesId: string; noteId?: string }
   | { action: 'setFields'; noteId: string; priority?: Priority; pinned?: boolean }
   | { action: 'openNote' | 'insertTemplateBlock'; noteId: string }

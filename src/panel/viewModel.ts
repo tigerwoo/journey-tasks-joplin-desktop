@@ -61,7 +61,7 @@ export function calendarWeeks(date: DateOnly): CalendarWeek[] {
 export function actualCount(items: readonly PreviewItem[]): number { return new Set(items.filter(item => item.kind === 'actual').map(item => item.occurrenceId ?? item.noteId ?? item.id)).size; }
 export function projectedCount(items: readonly PreviewItem[]): number { return new Set(items.filter(item => item.kind === 'projected').map(item => item.id)).size; }
 
-// Keep the entire civil day bounded. Nearby tasks share a scrollable cluster.
+// Logical civil-time positions define gaps; rendered groups may grow to fit all tasks.
 export const DAY_TIMELINE_HEIGHT = 768;
 export function dayTimelineGroups(items: readonly PreviewItem[]) {
   const rows = items.filter(item => item.schedule.kind === 'timed').map(item => {

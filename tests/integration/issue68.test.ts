@@ -98,6 +98,7 @@ test('issue68 freshly created inbox tasks sort newest first before and after res
 test('issue68 recurring periods and future previews use root creation time and match native and series titles', async () => {
   const host = new MemoryJoplin(); host.namespace = DEFAULT_PLUGIN_ID;
   host.notebooks.set('book', { id: 'book', title: 'Book' });
+  host.notebooks.set('other', { id: 'other', title: 'Other' });
   let now = Date.parse('2026-10-31T12:00Z');
   const app = new TaskApplication(host, { now: () => now }); await app.initialize();
   const made = await app.dispatch({ action: 'createTask', requestId: 'repeat', input: {

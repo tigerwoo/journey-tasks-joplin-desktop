@@ -23,19 +23,20 @@ for (const mode of ['continuous', 'archive'] as const) for (const first of ['202
     const made = await app.dispatch({ action: 'createTask', requestId: 'create', input: { title: 'First date', notebookId: 'book', schedule: date(first) } });
     assert.equal((await app.dispatch({ action: 'editTask', requestId: 'enable', noteId: made.noteId!, patch: { recurrence: { ...weekly, interval: 1 }, mode } })).status, 'saved');
     let series = (await app.snapshot()).series[0]!;
-    // Editing the rule must not rematch Monday to Friday, or an anchor back to a consumed period.
+    // An explicit current date overrides rule rematching while forecasts use the revised rule.
     const edited = { ...series.definition!, rule: weekly };
-    assert.equal((await app.dispatch({ action: 'reviseSeries', requestId: 'rule', seriesId: series.seriesId, revisionId: series.definition!.revisionId, definition: edited })).status, 'saved');
+    assert.equal((await app.dispatch({ action: 'reviseSeries', requestId: 'rule', seriesId: series.seriesId, revisionId: series.definition!.revisionId, definition: edited, currentSchedule: date(first) })).status, 'saved');
     app = new TaskApplication(host, options); await app.initialize();
     const month = await app.snapshot({ view: 'month', date: first, deviceZone: 'Asia/Shanghai' });
     series = month.series[0]!;
-    assert.equal(series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!.scheduled.date, first);
+    assert.equal(series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!.deferred?.date, first);
+    assert.equal(series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!.scheduled.date, '2026-10-30');
     assert.equal(month.items.filter(i => i.date === first).length, 1);
-    assert.equal(month.items.filter(i => i.date === '2026-10-30').length, 1);
+    assert.equal(month.items.filter(i => i.date === '2026-10-30').length, first === '2026-10-30' ? 1 : 0);
     assert.equal((await app.dispatch({ action: 'complete', requestId: 'done', seriesId: series.seriesId })).status, 'saved');
     series = (await app.snapshot()).series[0]!;
     assert.equal(series.consumedCount, 1);
-    assert.equal(series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!.scheduled.date, first === '2026-10-26' ? '2026-10-30' : '2026-11-13');
+    assert.equal(series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!.scheduled.date, '2026-11-13');
   });
 }
 

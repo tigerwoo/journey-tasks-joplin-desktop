@@ -1,0 +1,87 @@
+{
+  "checkedAt": "2026-10-31T03:07:18.248Z",
+  "timingsMs": [
+    74,
+    70,
+    69,
+    69,
+    68,
+    95,
+    71,
+    68,
+    71,
+    75
+  ],
+  "checks": {
+    "commandErrorCleared": true,
+    "backgroundUpdateWithoutSelection": true,
+    "externalCreationDiscovered": true,
+    "focusThrottled": true,
+    "noUnrelatedPinReads": true,
+    "noFullScans": true,
+    "noteBodyPreserved": true,
+    "realPanelOptimisticPin": true,
+    "realPanelOtherRowsEnabled": true
+  },
+  "version": {
+    "version": "3.7.22",
+    "syncVersion": 3,
+    "profileVersion": 54,
+    "platform": "desktop"
+  },
+  "refreshCalls": {
+    "fullScans": 0,
+    "metadataScans": 2,
+    "noteReads": [
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c",
+      "3f406890992541b29eb916f0f86fb64c"
+    ]
+  },
+  "uiInjectedHostDelayMs": 750,
+  "ui": {
+    "renderLatencyMs": 11,
+    "pinnedBeforeAcknowledgement": true,
+    "otherRowsEnabled": true
+  },
+  "uiCommandSaved": true,
+  "passed": true,
+  "probeArchiveSha256": "e06a192a0afbfc0cf3c3a609f931243cebbc361e3aa8d62e4b5bfc89105e7fa0",
+  "hostEnvironment": {
+    "platform": "darwin",
+    "architecture": "x64"
+  }
+}

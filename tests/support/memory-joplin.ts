@@ -50,6 +50,9 @@ export class MemoryJoplin {
     get: async (path: string[], query: Record<string, any> = {}): Promise<any> => {
       this.calls.push({ method: 'get', path: [...path], query: clone(query) });
       this.fault('get', path, false);
+      const project = (row: Row): Row => path[0] === 'folders' && Array.isArray(query.fields)
+        ? Object.fromEntries(query.fields.filter((key: string) => key in row).map((key: string) => [key, clone(row[key])])) as Row
+        : clone(row);
       const table = this.table(path);
       if (path.length > 1) {
         const row = table.get(path[1]!);
@@ -67,14 +70,15 @@ export class MemoryJoplin {
           return { items: clone(rows.slice(offset, offset + size)), has_more: offset + size < rows.length };
         }
         // Joplin's single-note model load adds type_, while paginated SQL rows do not.
-        return path[0] === 'notes' ? { ...clone(row), type_: 1 } : clone(row);
+        return path[0] === 'notes' ? { ...project(row), type_: 1 } : project(row);
       }
       let rows = [...table.values()];
+      if ((path[0] === 'folders' || path[0] === 'notes') && !query.include_deleted) rows = rows.filter(row => !row.deleted_time);
       if (query.is_todo !== undefined) rows = rows.filter(row => row.is_todo === query.is_todo);
       if (query.parent_id !== undefined) rows = rows.filter(row => row.parent_id === query.parent_id);
       const size = Math.min(Number(query.limit ?? this.pageSize), this.pageSize);
       const offset = (Number(query.page ?? 1) - 1) * size;
-      return { items: clone(rows.slice(offset, offset + size)), has_more: offset + size < rows.length };
+      return { items: rows.slice(offset, offset + size).map(project), has_more: offset + size < rows.length };
     },
     post: async (path: string[], query: Record<string, any> = {}, input: Record<string, any> = {}): Promise<any> => {
       this.calls.push({ method: 'post', path: [...path], query: clone(query), body: clone(input) });
@@ -118,8 +122,18 @@ export class MemoryJoplin {
             if (removed.has(folder.parent_id) && !removed.has(id)) { removed.add(id); changed = true; }
           }
         }
-        for (const [id, note] of this.notes) if (removed.has(note.parent_id)) this.notes.delete(id);
-        for (const id of removed) this.notebooks.delete(id);
+        for (const [id, note] of this.notes) if (removed.has(note.parent_id)) {
+          if (query?.permanent) this.notes.delete(id);
+          else this.notes.set(id, { ...note, deleted_time: ++this.timestamp, updated_time: this.timestamp });
+        }
+        for (const id of removed) {
+          if (query?.permanent) this.notebooks.delete(id);
+          else this.notebooks.set(id, { ...this.notebooks.get(id)!, deleted_time: ++this.timestamp });
+        }
+      } else if (path[0] === 'notes' && !query?.permanent) {
+        const note = this.notes.get(path[1]!);
+        if (!note) throw missing(path[1]!);
+        this.notes.set(note.id, { ...note, deleted_time: ++this.timestamp, updated_time: this.timestamp });
       } else this.table(path).delete(path[1]!);
       this.fault('delete', path, true);
     },

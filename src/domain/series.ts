@@ -134,7 +134,8 @@ export function reduceSeries(input: readonly DomainOperation[], options: ReduceO
     occurrence.historyDeleted = actions.some(op => op.payload.action === 'deleteHistory');
     const terminals = actions.filter(op => op.payload.action === 'complete' || op.payload.action === 'skip');
     const reopened = new Set(actions.filter(op => op.payload.action === 'reopen').flatMap(op => op.payload.action === 'reopen' && precedes(op.payload.targetOpId, op.opId) ? [op.payload.targetOpId] : []));
-    for (const op of ordered) if (op.kind === 'RewindAdvance' && op.payload.occurrenceId === occurrence.occurrenceId && precedes(op.payload.targetOpId, op.opId)) reopened.add(op.payload.targetOpId);
+    for (const op of ordered) if (op.kind === 'RewindAdvance' && op.payload.occurrenceId === occurrence.occurrenceId && precedes(op.payload.targetOpId, op.opId) &&
+      !liveAdvanceOps.some(edge => edge.payload.predecessorId === occurrence.occurrenceId && edge.payload.terminalOpId === op.payload.targetOpId)) reopened.add(op.payload.targetOpId);
     const live = heads(terminals).filter(op => !reopened.has(op.opId)).sort((a,b) => {
       const aRank = a.payload.action === 'complete' ? 0 : 1, bRank = b.payload.action === 'complete' ? 0 : 1;
       return aRank - bRank || compareIds(a.opId, b.opId);
@@ -165,7 +166,8 @@ export function reduceSeries(input: readonly DomainOperation[], options: ReduceO
       occurrence.originatingRevisionId = edit.opId;
       if (patch.clearDeferred && (!defer || precedes(defer.opId, edit.opId))) delete occurrence.deferred;
     }
-    const bindingOps = ordered.filter((op): op is Extract<DomainOperation,{kind:'BindCarrier'}> => op.kind === 'BindCarrier' && op.payload.occurrenceId === occurrence.occurrenceId && (op.payload.noteId === occurrence.carrierNoteId || !advanceOps.some(edge => edge.payload.next?.occurrenceId === occurrence.occurrenceId && edge.payload.next.carrierNoteId === occurrence.carrierNoteId && precedes(op.opId, edge.opId)))).sort((a,b) => compareIds(a.opId, b.opId));
+    const bindingOps = ordered.filter((op): op is Extract<DomainOperation,{kind:'BindCarrier'}> => op.kind === 'BindCarrier' && op.payload.occurrenceId === occurrence.occurrenceId &&
+      (op.payload.noteId === occurrence.carrierNoteId || !advanceOps.some(edge => rewound.has(edge.opId) && edge.payload.next?.occurrenceId === occurrence.occurrenceId && edge.payload.next.carrierNoteId === op.payload.noteId)) && (op.payload.noteId === occurrence.carrierNoteId || !advanceOps.some(edge => edge.payload.next?.occurrenceId === occurrence.occurrenceId && edge.payload.next.carrierNoteId === occurrence.carrierNoteId && precedes(op.opId, edge.opId)))).sort((a,b) => compareIds(a.opId, b.opId));
     bindings[occurrence.occurrenceId] = [...new Set([occurrence.carrierNoteId, ...bindingOps.map(op => op.payload.noteId)].filter(Boolean))].sort();
     if (bindingOps[0]) { occurrence.carrierNoteId = bindingOps[0].payload.noteId; occurrence.carrierGeneration = bindingOps[0].payload.generation; }
   }
@@ -206,8 +208,7 @@ export function reduceSeries(input: readonly DomainOperation[], options: ReduceO
     if (options.availableTemplateIds && displayDefinition.templateRevisionId && !new Set(options.availableTemplateIds).has(displayDefinition.templateRevisionId)) conflict('missing-template', 'Waiting for template revision', [displayDefinition.templateRevisionId]);
     const restored = new Set(ordered.filter((op):op is Extract<DomainOperation,{kind:'Restore'}>=>op.kind==='Restore').flatMap(op=>op.payload.targetOpIds.filter(id=>precedes(id,op.opId))));
     const stops = ordered.filter((op):op is Extract<DomainOperation,{kind:'StopOrDelete'}>=>op.kind==='StopOrDelete'&&!restored.has(op.opId));
-    if (stops.some(op=>op.payload.scope!=='stop')) conflict('deleted', 'Deleted or detached series requires explicit restore', stops.map(op=>op.opId));
-    const status: SeriesSnapshot['status'] = conflicts.length ? (conflicts.every(c=>['missing-parent','missing-template'].includes(c.code)) ? 'waiting':'pausedConflict') : (!activeOccurrenceId || stops.some(op=>op.payload.scope==='stop') ? 'ended':'active');
+    const status: SeriesSnapshot['status'] = conflicts.length ? (conflicts.every(c=>['missing-parent','missing-template'].includes(c.code)) ? 'waiting':'pausedConflict') : (!activeOccurrenceId || stops.length > 0 ? 'ended':'active');
     const projections = ordered.filter((op): op is Extract<DomainOperation,{kind:'ProjectionIntent'|'ProjectionReceipt'}>=>op.kind==='ProjectionIntent'||op.kind==='ProjectionReceipt').map(op=>structuredCopy(op.payload));
     return { seriesId, titleOperationId, definition: displayDefinition, revisionHeads:revisionHeads.map(op=>op.opId).sort(), operationHeads:heads(ordered).map(op=>op.opId).sort(), occurrences, activeOccurrenceId, consumedCount:[...reachable].filter(id => !!advances[id]).length, advances,bindings, projections,conflicts,status,operations };
   }

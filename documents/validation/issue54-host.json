@@ -1,0 +1,77 @@
+{
+  "checkedAt": "2026-10-30T15:46:16.548Z",
+  "events": [
+    {
+      "kind": "selection",
+      "event": {
+        "value": [
+          "deb834c4807844f19b1dba3fb5cd80ed"
+        ]
+      }
+    },
+    {
+      "kind": "selection",
+      "event": {
+        "value": [
+          "d3de7a21c3f142ee8516a0ade63f5deb"
+        ]
+      }
+    },
+    {
+      "kind": "selection",
+      "event": {
+        "value": [
+          "45fe6166fc844a0c812e67cee50110af"
+        ]
+      }
+    },
+    {
+      "kind": "selection",
+      "event": {
+        "value": [
+          "d3de7a21c3f142ee8516a0ade63f5deb"
+        ]
+      }
+    },
+    {
+      "kind": "selection",
+      "event": {
+        "value": [
+          "45fe6166fc844a0c812e67cee50110af"
+        ]
+      }
+    },
+    {
+      "kind": "selection",
+      "event": {
+        "value": [
+          "d3de7a21c3f142ee8516a0ade63f5deb"
+        ]
+      }
+    }
+  ],
+  "version": {
+    "version": "3.7.22",
+    "syncVersion": 3,
+    "profileVersion": 54,
+    "platform": "desktop"
+  },
+  "tagMembershipCorrect": true,
+  "backgroundUpdateBeforeSelection": false,
+  "backgroundUpdateAfterSelection": true,
+  "refreshCalls": {
+    "fullScans": 0,
+    "singleReads": 1
+  },
+  "unchangedSelectionVersionStable": true,
+  "noSelectionFullScan": true,
+  "commandWithOriginalVersion": {
+    "status": "saved"
+  },
+  "passed": true,
+  "probeArchiveSha256": "2ee7caf639e4207e8ba556bad44429717f741ddd62cf05e9e91d46f1c133746d",
+  "hostEnvironment": {
+    "platform": "darwin",
+    "architecture": "x64"
+  }
+}

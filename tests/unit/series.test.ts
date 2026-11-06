@@ -159,3 +159,24 @@ test('legacy and occurrence-scoped pins do not leak across advancement or comple
   assert.equal(edited.occurrences[first.occurrenceId]?.pinned, true);
   assert.equal(edited.occurrences[next.occurrenceId]?.pinned, false);
 });
+
+for (const scope of ['current', 'series'] as const) test(`legacy ${scope} deletion logs load as ended and can resume from a rule save`, () => {
+  const { create, first } = initialSeries();
+  const stop = operation('old-delete', 'StopOrDelete', { scope, occurrenceId: first.occurrenceId });
+  const ended = reduceSeries([create, stop]);
+  assert.equal(ended.status, 'ended'); assert.deepEqual(ended.conflicts, []);
+  const restore = operation('restore', 'Restore', { targetOpIds: [stop.opId] }, [stop.opId]);
+  assert.equal(reduceSeries([create, stop, restore]).status, 'active');
+});
+
+test('legacy full advancement rewind still reopens its predecessor', () => {
+  const { create, first, def } = initialSeries();
+  const done = operation('done', 'ActOccurrence', { action: 'complete', occurrenceId: first.occurrenceId, at: 1706700000000 });
+  const next = nextOccurrence(first, def);
+  const advance = operation('advance', 'Advance', { predecessorId: first.occurrenceId, terminalOpId: done.opId, next, ruleRevisionId: def.revisionId }, [done.opId]);
+  const rewind = operation('legacy-rewind', 'RewindAdvance', { targetOpIds: [advance.opId], occurrenceId: first.occurrenceId, targetOpId: done.opId }, [advance.opId]);
+  const snapshot = reduceSeries([create, done, advance, rewind]);
+  assert.equal(snapshot.status, 'active'); assert.equal(snapshot.activeOccurrenceId, first.occurrenceId);
+  assert.equal(snapshot.occurrences[first.occurrenceId]!.resolution, 'open'); assert.equal(snapshot.consumedCount, 0);
+  assert.equal(snapshot.occurrences[next.occurrenceId]!.withdrawn, true);
+});

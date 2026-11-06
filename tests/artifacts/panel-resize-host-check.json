@@ -106,5 +106,62 @@
       true
     ],
     "guides": 1
+  },
+  "minimum": {
+    "width": 400,
+    "x": 954,
+    "y": 500,
+    "handleWidth": 12,
+    "hits": [
+      true,
+      true,
+      true
+    ],
+    "guides": 1
+  },
+  "contentWidth": 400,
+  "filterLayout": [
+    {
+      "centerY": 210,
+      "right": 64,
+      "width": 50
+    },
+    {
+      "centerY": 210,
+      "right": 137,
+      "width": 65
+    },
+    {
+      "centerY": 210,
+      "right": 241,
+      "width": 96
+    },
+    {
+      "centerY": 210,
+      "right": 386,
+      "width": 137
+    },
+    {
+      "centerY": 254,
+      "right": 241,
+      "width": 227
+    },
+    {
+      "centerY": 254,
+      "right": 386,
+      "width": 30
+    }
+  ],
+  "recovered": {
+    "width": 500,
+    "x": 854,
+    "y": 500,
+    "handleWidth": 12,
+    "hits": [
+      true,
+      true,
+      true
+    ],
+    "guides": 1
   }
 }

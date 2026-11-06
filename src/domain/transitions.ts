@@ -40,11 +40,24 @@ export function nextPeriodCandidate(definition: SeriesDefinition, planned: Dated
   const basis = nextPeriodBasis(definition, planned, at, calendar);
   return nextCandidate(basis.definition, basis.after, calendar, consumedCount);
 }
-export function planAdvance(snapshot: SeriesSnapshot, at: number, calendar: CalendarContext, creatingOpId: string): AdvancePayload {
+/** Recalculate an open period, or continue an ended series, using the same basis as normal advancement. */
+export function revisedPeriodCandidate(definition: SeriesDefinition, history: readonly Pick<Occurrence, 'scheduled' | 'resolvedAt'>[], calendar: CalendarContext, consumedCount: number) {
+  if (definition.rule.basis === 'completed' && history.length) {
+    const previous = history[history.length - 1]!;
+    const basis = nextPeriodBasis(definition, previous.scheduled, previous.resolvedAt ?? scheduleInstant(previous.scheduled, calendar.zone), calendar);
+    return nextCandidate(basis.definition, Math.max(basis.after, scheduleInstant(definition.anchor, calendar.zone) - 1), calendar, consumedCount);
+  }
+  // Exclude every historical calendar date, including when the anchor clock changes.
+  const after = Math.max(scheduleInstant(definition.anchor, calendar.zone) - 1,
+    ...history.map(row => scheduleInstant(scheduleForDate(definition.anchor, row.scheduled.date, calendar), calendar.zone)));
+  return nextCandidate(definition, after, calendar, consumedCount);
+}
+export function planAdvance(snapshot: SeriesSnapshot, at: number, calendar: CalendarContext, creatingOpId: string, schedule?: DatedSchedule): AdvancePayload {
   const occurrence = current(snapshot);
   if (!canAdvance(snapshot, occurrence.occurrenceId) || !occurrence.terminalOpId) throw new Error('Only an unconsumed resolved active occurrence may advance');
   const definition = snapshot.definition!;
-  const candidate = nextPeriodCandidate(definition, occurrence.scheduled, occurrence.resolvedAt ?? at, calendar, snapshot.consumedCount + 1);
+  const candidate = schedule ? { schedule }
+    : nextPeriodCandidate(definition, occurrence.scheduled, occurrence.resolvedAt ?? at, calendar, snapshot.consumedCount + 1);
   const base: AdvancePayload = { predecessorId: occurrence.occurrenceId, terminalOpId: occurrence.terminalOpId, next: null, ruleRevisionId: definition.revisionId };
   if (!candidate) return base;
   const id = occurrenceKey(snapshot.seriesId, occurrence.occurrenceId);

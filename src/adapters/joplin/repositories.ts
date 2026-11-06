@@ -34,6 +34,7 @@ export interface ControlMeta {
   anchorGeneration?: number;
   transferId?: string;
   ancestorNoteIds?: string[];
+  stoppedSeriesId?: string;
 }
 interface AnchorCommit { schemaVersion: 3; seriesId: string; transferId: string; rootNoteId: string; ancestorNoteIds: string[]; operationHashes: Record<string, string> }
 const commitKey = (seriesId: string, transferId: string): string => boundedKey(`v3:anchor-commit:${encodedScope(seriesId)}:${requireId(transferId)}`);

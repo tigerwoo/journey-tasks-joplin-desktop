@@ -38,7 +38,7 @@ export interface NativeNote {
   is_conflict?: number;
   markup_language?: number;
 }
-export interface NativeFolder { id: string; title: string; parent_id?: string; user_data?: string; encryption_applied?: number; }
+export interface NativeFolder { id: string; title: string; parent_id?: string; user_data?: string; encryption_applied?: number; deleted_time?: number; user_updated_time?: number; }
 export interface NativeTag { id: string; title: string }
 export interface NativeResource { id: string; title?: string; size?: number; }
 export type NotePatch = Partial<Pick<NativeNote, 'title' | 'body' | 'parent_id' | 'is_todo' | 'todo_due' | 'todo_completed'>>;
@@ -101,7 +101,9 @@ export class JoplinGateway {
   async folders(): Promise<NativeFolder[]> {
     // Joplin's allForDisplay + allAsTree applies the host's locale, sort field
     // and reverse setting. Preserve that order instead of re-sorting in the panel.
-    const roots = await this.api.data.get(['folders'], { as_tree: 1, fields: ['id', 'title', 'parent_id', 'user_updated_time', 'user_data', 'encryption_applied'] });
+    // Management scans must retain deleted folders; the application filters selectable folders.
+    const query = { include_deleted: 1, fields: ['id', 'title', 'parent_id', 'user_updated_time', 'user_data', 'encryption_applied', 'deleted_time'] };
+    const roots = await this.api.data.get(['folders'], { ...query, as_tree: 1 });
     const output: NativeFolder[] = [];
     const visited = new Set<string>();
     const walk = (values: any[], parentId = '') => {
@@ -116,7 +118,7 @@ export class JoplinGateway {
     if (Array.isArray(roots)) walk(roots);
     else if (Array.isArray(roots?.items)) {
       walk(roots.items);
-      if (roots.has_more) return this.paginate<NativeFolder>(['folders'], { fields: ['id', 'title', 'parent_id', 'user_data', 'encryption_applied'] });
+      if (roots.has_more) return this.paginate<NativeFolder>(['folders'], query);
     } else throw new StorageError('INVALID_FOLDERS', '无法读取笔记本列表。');
     return output;
   }
@@ -163,6 +165,19 @@ export class JoplinGateway {
     const note = await this.getNote(id);
     if (!note) throw new StorageError('MISSING_NOTE', '笔记写入后无法读取。', { noteId: id });
     return note;
+  }
+
+  /** Explicit restore only. Ordinary NotePatch never permits deletion-state changes. */
+  async restoreNote(id: string): Promise<NativeNote> {
+    const note = await this.getNote(id);
+    if (!note) throw new StorageError('RESTORE_FIRST_MISSING', '第一篇任务笔记已永久删除，无法恢复。请新建重复任务替代。');
+    if (note.encryption_applied || note.is_conflict) throw new StorageError('NOTE_UNAVAILABLE', '笔记暂不可用。');
+    if (!note.deleted_time) return note;
+    this.changedNoteIds.add(id);
+    await this.api.data.put(['notes', id], null, { deleted_time: 0 });
+    const restored = await this.getNote(id);
+    if (!restored || restored.deleted_time !== 0) throw new StorageError('RESTORE_FIRST_FAILED', '第一篇任务笔记未能恢复，请在 Joplin 中检查回收站后重试。');
+    return restored;
   }
 
   async deleteNote(id: string, permanent = false): Promise<void> { this.changedNoteIds.add(id); await this.api.data.delete(['notes', id], permanent ? { permanent: 1 } : null); }

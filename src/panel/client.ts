@@ -1,5 +1,5 @@
 import type { ActionResult, ApplicationCommand, ApplicationSnapshot, ViewQuery } from '../services/applicationTypes';
-export interface PanelReply { ok: boolean; snapshot?: ApplicationSnapshot; result?: ActionResult; error?: string; code?: string; uiAction?: { type: 'new' | 'series'; noteId?: string } }
+export interface PanelReply { ok: boolean; compact?: boolean; snapshot?: ApplicationSnapshot; result?: ActionResult; error?: string; code?: string; uiAction?: { type: 'new' | 'series' | 'edit'; noteId?: string } }
 declare const webviewApi: { postMessage(message: unknown): Promise<PanelReply>; onMessage(handler: (message: { message?: any }) => void): void };
 let seq = 0;
 export class PanelClientError extends Error {
@@ -18,11 +18,12 @@ export async function sendCommand(command: ApplicationCommand): Promise<ActionRe
   if (response.result.status !== 'saved') throw new PanelClientError(response.result.code || 'error.stale', response.result.message || 'error.stale');
   return response.result;
 }
-export function listenInvalidation(handler: () => void, onAction?: (action: { type: 'new' | 'series'; noteId?: string }) => void): void {
+export function listenInvalidation(handler: () => void, onAction?: (action: { type: 'new' | 'series' | 'edit'; noteId?: string }) => void, onRestore?: () => void): void {
   window.addEventListener('journey-ui-action', event => onAction?.((event as CustomEvent).detail));
   webviewApi.onMessage(event => {
     const message = event.message ?? event;
     if (message.type === 'invalidate') handler();
+    if (message.type === 'restorePanel') onRestore?.();
   });
 }
 
@@ -68,4 +69,11 @@ export async function reportIssue(): Promise<void> {
 export async function supportAuthor(): Promise<void> {
   const response = await webviewApi.postMessage({ protocolVersion: 1, requestId: requestId(), action: 'supportAuthor' });
   if (!response.ok) throw new PanelClientError(response.code || 'error.failed', response.error);
+}
+
+/** False asks the UI to use its content-only fallback on hosts without chrome CSS. */
+export async function collapsePanel(): Promise<boolean> {
+  const response = await webviewApi.postMessage({ protocolVersion: 1, requestId: requestId(), action: 'collapsePanel' });
+  if (!response.ok) throw new PanelClientError(response.code || 'error.failed', response.error);
+  return response.compact === true;
 }

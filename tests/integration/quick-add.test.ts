@@ -17,7 +17,7 @@ function markup(preferences = defaultPreferences, folders = [{ id: 'book', title
 
 test('quick add shows its notebook and date defaults, falls back from deleted notebooks, and disables creation without a notebook', () => {
   assert.match(markup(), /添加任务至“工作”/);
-  assert.match(markup(), /今日/);
+  assert.match(markup(), /今天/);
   assert.match(markup({ ...defaultPreferences, quickAddDate: 'none' }), /无日期/);
   assert.match(markup({ ...defaultPreferences, quickAddDate: 'tomorrow' }), /明天/);
   assert.match(markup({ ...defaultPreferences, quickAddDate: '2026-11-02' }), /11月2日/);

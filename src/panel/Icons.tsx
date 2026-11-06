@@ -1,4 +1,6 @@
 const paths = {
+  collapse: 'm9 6 6 6-6 6M3 6l6 6-6 6',
+  restore: 'm15 6-6 6 6 6m6-12-6 6 6 6',
   check: 'm5 12 4 4L19 6',
   projected: '',
   feedback: 'M21 11a8 8 0 0 1-8 8H7l-5 3V11a8 8 0 0 1 8-8h3a8 8 0 0 1 8 8ZM12 7v5M12 15h.01',

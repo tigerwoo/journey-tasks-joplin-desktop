@@ -9,7 +9,8 @@ process.chdir(root);
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist', { recursive: true });
 await mkdir('publish', { recursive: true });
-const opts = { bundle: true, platform: 'browser', target: 'es2020', minify: true,
+// Keep localized text in UTF-8 instead of expanding it to Unicode escape sequences.
+const opts = { bundle: true, platform: 'browser', target: 'es2020', charset: 'utf8', minify: true,
   legalComments: 'eof', sourcemap: false, metafile: true, tsconfig: 'tsconfig.json' };
 // Discover the host graph before pruning: UI-only translations must never enter index.js.
 const hostOptions = { ...opts, entryPoints: ['src/index.ts'], outfile: 'dist/index.js', format: 'cjs' };
@@ -32,8 +33,11 @@ for (const meta of [host.metafile, panel.metafile]) {
     if (out.imports.length) throw new Error('Unexpected external runtime imports: ' + JSON.stringify(out.imports));
   }
 }
+await build({ ...opts, entryPoints: ['src/panel/mini.ts'], outfile: 'dist/mini.js', format: 'iife' });
+await copyFile('src/panel/mini.css', 'dist/mini.css');
 const css = await build({ entryPoints: ['src/panel/panel.css'], outfile: 'dist/panel.css', bundle: true,
   loader: { '.png': 'file' }, assetNames: 'assets/[name]-[hash]', metafile: true, target: 'es2020', minify: true });
+await copyFile('src/panel/host.css', 'dist/host.css');
 await copyFile('src/manifest.json', 'dist/manifest.json');
 const manifest = JSON.parse(await readFile('src/manifest.json', 'utf8'));
 await copyFile('LICENSE', 'dist/LICENSE');
@@ -50,7 +54,7 @@ function header(name, size) {
   return h;
 }
 const chunks = [];
-const runtimeFiles = ['index.js', 'panel.js', 'panel.css', 'manifest.json', 'LICENSE',
+const runtimeFiles = ['mini.js', 'mini.css', 'host.css', 'index.js', 'panel.js', 'panel.css', 'manifest.json', 'LICENSE',
   ...Object.keys(css.metafile.outputs).filter(file => file !== 'dist/panel.css').map(file => path.relative('dist', file))];
 const artifactBytes = {};
 for (const name of runtimeFiles) {

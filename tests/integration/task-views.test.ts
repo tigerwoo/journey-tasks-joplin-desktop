@@ -99,12 +99,13 @@ test('reminder bells distinguish upcoming, elapsed and completed reminders in fu
 });
 
 
-test('month view shows all tasks on busy days instead of hiding tasks after the third', () => {
+test('month view limits busy days to three tasks with a total and expand control', () => {
   const items = Array.from({ length: 12 }, (_, index) => ({ ...item, id: `month-${index}`, noteId: `month-${index}`, title: `Month task ${index + 1}` }));
   const html = render(React.createElement(CalendarMonth, { date: item.date, selectedDate: item.date, items, onSelect: noop, renderList }));
-  assert.equal((html.match(/class="task-row/g) || []).length, 12);
-  assert.match(html, /Month task 12/);
-  assert.doesNotMatch(html, /class="overflow-count"/);
+  assert.equal((html.match(/class="task-row/g) || []).length, 3);
+  assert.doesNotMatch(html, /Month task 12/);
+  assert.match(html, /12 tasks \/ Show all/);
+  assert.match(html, /aria-expanded="false"/);
 });
 
 test('task list and day timeline honor the saved clock format independently of language', () => {

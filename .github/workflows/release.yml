@@ -30,6 +30,10 @@ jobs:
       - run: npm run verify:release
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+      - name: Extract release notes for this tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-notes.mjs > "$RUNNER_TEMP/release-notes.md"
       - uses: actions/upload-artifact@v4
         with:
           name: release-package
@@ -43,7 +47,9 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+            gh release create "$RELEASE_TAG" --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md" --title "$RELEASE_TAG"
+          else
+            gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
           gh release upload "$RELEASE_TAG" publish/*.jpl publish/io.journey.tasks.*.json --clobber
 

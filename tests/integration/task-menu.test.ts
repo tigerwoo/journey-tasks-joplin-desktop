@@ -90,8 +90,9 @@ test('native delete trashes only the selected carrier and never deletes siblings
   assert.equal(deletes.length, 1); assert.equal(deletes[0]!.path[1], current.carrierNoteId); assert.ok(!deletes[0]!.query?.permanent);
   assert.equal(host.notes.get(made.noteId!)!.body, previousBody);
   const restarted = new TaskApplication(host, options); await restarted.initialize(); await restarted.dispatch({ action: 'refresh', requestId: 'delete-refresh' });
-  assert.equal(host.notes.has(current.carrierNoteId), false); assert.equal(host.notes.size, 1);
-  assert.equal((await restarted.snapshot()).series[0]!.status, 'ended');
+  assert.ok(host.notes.get(current.carrierNoteId)!.deleted_time); assert.equal(host.notes.size, 2);
+  assert.ok(!(await restarted.snapshot()).tasks.some(task => task.noteId === current.carrierNoteId));
+  assert.equal((await restarted.snapshot()).series[0]!.status, 'waiting');
 });
 
 test('snapshot exposes existing native notebook and paginated tag names without creating categories', async () => {
@@ -222,7 +223,7 @@ for (const mode of ['continuous', 'archive'] as const) test(`${mode} history del
   const body = host.notes.get(current.carrierNoteId)!.body;
   const deleted = await app.dispatch({ action: 'deleteNativeTask', requestId: 'history-delete', noteId: history.carrierNoteId, occurrenceId: history.occurrenceId });
   assert.equal(deleted.status, 'saved', deleted.message);
-  assert.equal(host.notes.has(history.carrierNoteId), mode === 'continuous');
+  assert.equal(!!host.notes.get(history.carrierNoteId)!.deleted_time, mode === 'archive');
   assert.equal(host.notes.get(current.carrierNoteId)!.body, body);
   const restarted = new TaskApplication(host, options); await restarted.initialize();
   const after = await restarted.snapshot({ showCompleted: true });
@@ -247,7 +248,7 @@ test('deleting archived first history pauses for anchor recovery without recordi
   const deleted = await app.dispatch({ action: 'deleteNativeTask', requestId: 'anchor-delete', noteId: made.noteId!, occurrenceId: first });
   assert.equal(deleted.status, 'saved', deleted.message);
   const restarted = new TaskApplication(host, options); await restarted.initialize();
-  assert.equal((await restarted.snapshot()).series[0]!.status, 'waiting');
+  assert.equal((await restarted.snapshot()).series.length, 0);
   const done = await restarted.dispatch({ action: 'complete', requestId: 'anchor-next', seriesId: made.seriesId, occurrenceId: current });
   assert.equal(done.status, 'saved', done.message);
   assert.equal(done.code, 'ANCHOR_MISSING_PENDING');

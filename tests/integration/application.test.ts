@@ -225,7 +225,7 @@ test('missing first carrier permits saving current completion but never generate
   host.notes.delete(made.noteId!);
   await app.dispatch({ action: 'refresh', requestId: 'missing-history' });
   const snapshot = await app.snapshot();
-  assert.equal(snapshot.series[0]?.status, 'waiting');
+  assert.equal(snapshot.series.length, 0, 'missing first note has no fabricated recovery summary');
   const count = host.notes.size;
   const later = setup(host, Date.parse('2026-10-25T04:00:00Z')).app; await later.initialize();
   const blocked = await later.dispatch({ action: 'complete', requestId: 'no-zombie', seriesId: made.seriesId, occurrenceId: next });
@@ -235,7 +235,7 @@ test('missing first carrier permits saving current completion but never generate
   assert.equal(host.notes.get(carrier)!.todo_due, 0);
   assert.equal(host.notes.size, count);
   assert.equal(host.notes.has(made.noteId!), false);
-  assert.ok((await later.snapshot()).diagnostics.some(item => item.code === 'ANCHOR_MISSING_PENDING'));
+  assert.ok(!(await later.snapshot()).diagnostics.some(item => item.code === 'ANCHOR_MISSING_PENDING'));
 });
 
 test('explicit current schedule edit clears an observed postponement but not a later new postponement', async () => {
@@ -249,7 +249,7 @@ test('explicit current schedule edit clears an observed postponement but not a l
   assert.equal(revised.status, 'saved', revised.message);
   series = (await app.snapshot()).series[0]!;
   let current = series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!;
-  assert.equal(current.scheduled.date, '2026-10-26'); assert.equal(current.deferred, undefined);
+  assert.equal(current.scheduled.date, '2026-10-26'); assert.deepEqual(current.deferred, anchor);
   await app.dispatch({ action: 'changeDate', requestId: 'later-defer', noteId: made.noteId!, schedule: { ...anchor, date: '2026-10-27' } });
   series = (await app.snapshot()).series[0]!; current = series.occurrences.find(o => o.occurrenceId === series.activeOccurrenceId)!;
   assert.equal(current.deferred?.date, '2026-10-27');

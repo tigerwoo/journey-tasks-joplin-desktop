@@ -1,6 +1,6 @@
 {
   "name": "joplin-plugin-journey-tasks",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Joplin task agenda with recurring and lunar tasks",
   "license": "MIT",
   "keywords": [

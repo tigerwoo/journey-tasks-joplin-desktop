@@ -1,0 +1,22 @@
+{
+  "checkedAt": "2026-10-30T16:25:24.992Z",
+  "calls": [
+    [
+      "openItem",
+      "https://github.com/tigerwoo/journey-tasks-joplin-desktop/issues"
+    ]
+  ],
+  "version": {
+    "version": "3.7.22",
+    "syncVersion": 3,
+    "profileVersion": 54,
+    "platform": "desktop"
+  },
+  "passed": true,
+  "scope": "Real Joplin panel DOM click through webview messaging to successful native openItem command; browser page appearance requires visual confirmation.",
+  "probeArchiveSha256": "cd0d2d504597c1a648f6d0c09ca9ac5d751c964119215d1c5a3b9d5464263498",
+  "hostEnvironment": {
+    "platform": "darwin",
+    "architecture": "x64"
+  }
+}

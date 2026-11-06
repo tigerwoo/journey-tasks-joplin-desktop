@@ -13,9 +13,10 @@ type MenuEvent = React.MouseEvent<HTMLElement>;
 const today = () => timezoneAdapter.localDate(Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
 export interface TaskListProps {
   items: PreviewItem[]; busy: boolean; onSelect: (item: PreviewItem, event?: MenuEvent) => void; onComplete: (item: PreviewItem) => void;
+  onOpenNotebook?: (notebookId: string) => void;
   pendingIds?: ReadonlySet<string>; selectedIds?: ReadonlySet<string>; onToggleSelection?: (item: PreviewItem) => void; folders?: Named[]; tags?: Named[]; onMenu?: (item: PreviewItem, event: MenuEvent) => void; compact?: boolean; hideDate?: boolean;
 }
-export function TaskList({ items, busy, onSelect, onComplete, folders = [], tags = [], onMenu, compact = false, hideDate = false, pendingIds, selectedIds, onToggleSelection }: TaskListProps) {
+export function TaskList({ items, busy, onSelect, onComplete, folders = [], tags = [], onMenu, compact = false, hideDate = false, pendingIds, selectedIds, onToggleSelection, onOpenNotebook }: TaskListProps) {
   const { locale } = useTranslation();
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -33,12 +34,12 @@ export function TaskList({ items, busy, onSelect, onComplete, folders = [], tags
   const yearFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }), [locale]);
   // Only reminder transitions and local date changes need to invalidate every row.
   return <div className={`task-list ${compact ? 'mini-tasks' : ''}`}>{items.map(item => <TaskRow key={item.id}
-    item={item} busy={busy} onSelect={onSelect} onComplete={onComplete} onMenu={onMenu} onToggleSelection={onToggleSelection}
+    item={item} busy={busy} onSelect={onSelect} onComplete={onComplete} onMenu={onMenu} onToggleSelection={onToggleSelection} onOpenNotebook={onOpenNotebook}
     compact={compact} hideDate={hideDate} folderMap={folderMap} tagMap={tagMap} dateFormatter={dateFormatter} yearFormatter={yearFormatter}
     todayDate={todayDate} currentTime={now}
     selected={!!selectedIds?.has(item.occurrenceId || item.noteId || '')} hasSelection={!!selectedIds} pending={!!pendingIds?.has(item.noteId || '')} />)}</div>;
 }
-const TaskRow = memo(function TaskRow({ item, busy, onSelect, onComplete, onMenu, onToggleSelection, compact, hideDate,
+const TaskRow = memo(function TaskRow({ item, busy, onSelect, onComplete, onMenu, onToggleSelection, onOpenNotebook, compact, hideDate,
   selected, pending, hasSelection, folderMap, tagMap, currentTime, todayDate, dateFormatter, yearFormatter }: Omit<TaskListProps, 'items' | 'folders' | 'tags' | 'selectedIds' | 'pendingIds'> & {
   item: PreviewItem; selected: boolean; pending: boolean; hasSelection: boolean; folderMap: Map<string, Named>; tagMap: Map<string, Named>;
   currentTime: number; todayDate: string; dateFormatter: Intl.DateTimeFormat; yearFormatter: Intl.DateTimeFormat;
@@ -59,12 +60,14 @@ const TaskRow = memo(function TaskRow({ item, busy, onSelect, onComplete, onMenu
     onContextMenu={e => { if (item.kind === 'actual' && onMenu) { e.preventDefault(); onMenu(item, e); } }}
     className={`task-row ${item.kind === 'projected' ? 'projected' : ''} ${item.overdue ? 'overdue' : ''} ${item.completed ? 'completed' : ''}`}>
     {item.kind === 'actual' ? <input type="checkbox" aria-label={t(item.completed ? 'actions.reopenTask' : 'actions.completeTask', { title: item.title })}
-      checked={item.completed} disabled={busy || pending || (!item.completed && item.schedule.kind !== 'none' && item.schedule.date > timezoneAdapter.localDate(currentTime, item.schedule.zone))} onChange={e => { e.stopPropagation(); onComplete(item); }} /> : <span className="preview-dot" title={[t('calendar.previewHint'), item.assumption ? message(item.assumption) : ''].filter(Boolean).join(' · ')} role="img" aria-label={t('calendar.previewHint')}><Icon name="projected" size={18} /></span>}
+      checked={item.completed} disabled={busy || pending || (item.historical && !item.seriesId) || (!item.completed && item.schedule.kind !== 'none' && item.schedule.date > timezoneAdapter.localDate(currentTime, item.schedule.zone))} onChange={e => { e.stopPropagation(); onComplete(item); }} /> : <span className="preview-dot" title={[t('calendar.previewHint'), item.assumption ? message(item.assumption) : ''].filter(Boolean).join(' · ')} role="img" aria-label={t('calendar.previewHint')}><Icon name="projected" size={18} /></span>}
     <button className="task-content" aria-pressed={item.kind === 'actual' && hasSelection ? selected : undefined} title={item.title} onClick={e => onSelect(item, e)}><span className="task-heading">{leadingRepeat && item.seriesId && repeatMark}<span className="task-title">{item.title}</span>
       {!!item.reminderAt && <span className={`reminder-mark ${!item.completed && item.reminderAt > currentTime ? 'active' : 'expired'}`} role="img" aria-label={t(!item.completed && item.reminderAt > currentTime ? 'reminder.active' : 'reminder.expired')} title={t(!item.completed && item.reminderAt > currentTime ? 'reminder.active' : 'reminder.expired')}><Icon name="bell" size={16} /></span>}
       {!compact && !!item.tagIds?.length && <span className="task-tags">{item.tagIds.map(id => tagMap.get(id)).filter(Boolean).map(tag => <span className="task-tag" key={tag!.id}>{tag!.title}</span>)}</span>}
     </span></button>
-    {!compact && <span className="task-notebook" title={folderMap.get(item.notebookId || '')?.title}>{folderMap.get(item.notebookId || '')?.title}</span>}
+    {!compact && (onOpenNotebook && item.notebookId && folderMap.has(item.notebookId)
+      ? <button type="button" className="task-notebook notebook-link" aria-label={`${t('view.all')} · ${t('field.notebook')}: ${folderMap.get(item.notebookId)?.title}`} title={folderMap.get(item.notebookId)?.title} disabled={busy} onClick={event => { event.stopPropagation(); onOpenNotebook(item.notebookId!); }}>{folderMap.get(item.notebookId)?.title}</button>
+      : <span className="task-notebook" title={folderMap.get(item.notebookId || '')?.title}>{folderMap.get(item.notebookId || '')?.title}</span>)}
     {!leadingRepeat && item.seriesId && repeatMark}
     {!compact && !hideDate && <time className="task-date" dateTime={item.date || undefined}>{item.schedule.kind === 'none' ? t('view.inbox') : <>{displayDate(item.date, calendar, t, item.date === todayDate ? t('view.today') : item.date === addDays(todayDate, 1) ? t('view.tomorrow') : (item.date.slice(0, 4) !== todayDate.slice(0, 4) ? yearFormatter : dateFormatter).format(new Date(item.date + 'T12:00:00Z')))}{item.schedule.kind === 'timed' ? ` ${formatTime(item.schedule.instant)}` : ''}</>}</time>}
     {item.kind === 'actual' && onMenu && <button className="more" aria-label={t('menu.task', { title: item.title })} onClick={e => { e.stopPropagation(); onMenu(item, e); }}>⋯</button>}
@@ -127,7 +130,7 @@ export function CalendarDay({ items, renderList, selectedIds }: { items: Preview
     {groups.length > 0 && <div className="timed-day">
       {groups.map((group, index) => <React.Fragment key={group.items[0]!.id}>
         {gap(index ? groups[index - 1]!.top + groups[index - 1]!.height : 0, group.top)}
-        <div className={`timeline-cluster ${group.items.length > 1 ? 'dense' : ''}`} title={group.items.length > 1 ? t('calendar.moreTasks', {count: group.items.length - 1}) : undefined} style={{height: group.height}} tabIndex={group.items.length > 1 ? 0 : undefined}>{group.items.map(row)}</div>
+        <div className={`timeline-cluster ${group.items.length > 1 ? 'dense' : ''}`} style={{minHeight: group.height}}>{group.items.map(row)}</div>
       </React.Fragment>)}
       {gap(groups[groups.length - 1]!.top + groups[groups.length - 1]!.height, DAY_TIMELINE_HEIGHT)}
     </div>}
@@ -145,10 +148,18 @@ export function CalendarMonth({ date, items, selectedDate, onSelect, onWeek, ren
     {weeks.map(week => <div className="calendar-week" key={week.start}><button className="week-number" title={t('calendar.openWeek', { date: week.start })} aria-label={t('calendar.weekAccessible', { number: week.weekNumber, date: week.start })} disabled={!onWeek} onClick={() => onWeek?.(week.start)}>{week.weekNumber}</button>
       {week.dates.map(d => { const group = items.filter(i => i.date === d); return <section key={d} className={`calendar-cell ${d.slice(0, 7) !== month ? 'outside' : ''} ${d === selectedDate ? 'selected' : ''} ${d === today() ? 'is-today' : ''} ${group.length ? 'has-tasks' : ''}`}>
         <button className="calendar-day" title={lunarText(d, t)} aria-label={t('calendar.dayAccessible', { date: d, count: group.length })} aria-pressed={d === selectedDate} onClick={() => onSelect(d)}><span className="day-number">{displayDate(d, calendar, t, String(Number(d.slice(8))))}</span>{compact && group.length > 0 && <span className="day-count">{group.length}</span>}</button>
-        {!compact && renderList && renderList(group)}
+        {!compact && renderList && <MonthTasks key={`${month}:${d}`} items={group} renderList={renderList} />}
       </section>; })}
     </div>)}
   </div>;
+}
+function MonthTasks({ items, renderList }: { items: PreviewItem[]; renderList: (items: PreviewItem[]) => React.ReactNode }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  return <>{renderList(expanded ? items : items.slice(0, 3))}{items.length > 3 && <button
+    type="button" className="overflow-count" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+    {t('calendar.taskCount', { count: items.length })} / {t(expanded ? 'calendar.collapseTasks' : 'calendar.expandTasks')}
+  </button>}</>;
 }
 export function CalendarWeek({ date, items, onSelect, renderList }: { date: string; items: PreviewItem[]; onSelect: (d: string) => void; renderList: (items: PreviewItem[]) => React.ReactNode }) {
   const { t } = useTranslation();

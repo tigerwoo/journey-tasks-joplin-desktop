@@ -3,18 +3,24 @@ import { NotebookTree } from './NotebookPicker';
 import { DateTimeInput } from './DateTimeInput';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Task } from '../shared/models';
-import type { ApplicationCommand, ActionResult } from '../services/applicationTypes';
+import type { ApplicationCommand, ActionResult, SeriesSummary } from '../services/applicationTypes';
 import { addDays } from '../domain/dates';
 import { resolveZonedTime, timezoneAdapter } from '../adapters/calendar/timezoneAdapter';
 import { useTranslation } from '../i18n/react';
 import { Icon } from './Icons';
 const timezoneToday = (zone: string) => new Intl.DateTimeFormat('sv-SE', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(Date.now());
 type Input = ApplicationCommand extends infer C ? C extends ApplicationCommand ? Omit<C, 'requestId' | 'expectedSnapshotVersion'> : never : never;
-export function TaskContextMenu({ task, tasks = [task], x, y, busy, folders, onCommand, onClose, onHistory, error, errorCode }: {
-  task: Task; tasks?: Task[]; x: number; y: number; busy: boolean; folders: Notebook[];
+export function TaskContextMenu({ task, tasks = [task], x, y, busy, folders, onCommand, onClose, onHistory, error, errorCode, series = [] }: {
+  task: Task; tasks?: Task[]; series?: SeriesSummary[]; x: number; y: number; busy: boolean; folders: Notebook[];
   onCommand: (inputs: Input[]) => Promise<ActionResult | undefined>; onClose: () => void; onHistory?: () => void; error?: string; errorCode?: string;
 }) {
   const { t, message } = useTranslation();
+  const deleteConfirmation = () => [...new Set(tasks.map(target => {
+    const summary = series.find(row => row.seriesId === target.seriesId);
+    if (!summary || target.historical) return t('menu.confirmDelete');
+    const current = summary.occurrences.find(row => row.occurrenceId === summary.activeOccurrenceId);
+    return current?.mode === 'continuous' ? t('confirm.deleteCurrentContinuous') : t('confirm.deleteCurrentArchive');
+  }))].join('\n\n');
   const [picker, setPicker] = useState<'date' | 'move'>();
   const today = timezoneAdapter.localDate(Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
   const [date, setDate] = useState(task.schedule.kind === 'none' ? today : task.schedule.date);
@@ -94,7 +100,7 @@ export function TaskContextMenu({ task, tasks = [task], x, y, busy, folders, onC
       <button role="menuitem" onMouseEnter={closeSubmenu} disabled={busy || failed || tasks.some(target => target.historical)} onClick={() => void execute({ action: 'setFields', noteId: task.noteId, pinned: !task.pinned })}><Icon name={allPinned ? 'unpin' : 'pin'} />{t(allPinned ? 'menu.unpin' : 'menu.pin')}</button>
       <button role="menuitem" onMouseEnter={closeSubmenu} disabled={busy || failed || future || tasks.some(target => !!target.completedAt || target.historical)} onClick={() => void execute({ action: 'abandonTask', noteId: task.noteId })}><Icon name="abandon" />{t('menu.abandon')}</button>
       <button role="menuitem" disabled={busy || failed || tasks.some(target => target.historical)} data-submenu="move" aria-haspopup="dialog" aria-expanded={picker === 'move'} onMouseEnter={() => !busy && !failed && !tasks.some(target => target.historical) && setPicker('move')} onClick={() => setPicker('move')}><Icon name="folder" />{t('menu.move')}<span className="menu-chevron">›</span></button>
-      <button role="menuitem" onMouseEnter={closeSubmenu} className="danger" disabled={busy || failed} onClick={() => { if (confirm(tasks.length > 1 ? t('menu.confirmDeleteMany', { count: tasks.length }) : t('menu.confirmDelete'))) void execute({ action: 'deleteNativeTask', noteId: task.noteId }); else onClose(); }}><Icon name="trash" />{t('menu.delete')}</button>
+      <button role="menuitem" onMouseEnter={closeSubmenu} className="danger" disabled={busy || failed} onClick={() => { if (confirm(tasks.length > 1 ? t('menu.confirmDeleteMany', { count: tasks.length }) + '\n\n' + deleteConfirmation() : deleteConfirmation())) void execute({ action: 'deleteNativeTask', noteId: task.noteId }); else onClose(); }}><Icon name="trash" />{t('menu.delete')}</button>
     </div>
     {error && <p className="error" role="alert">{message(error, errorCode)}</p>}
     {picker && <div ref={submenuRef} className="menu-submenu" style={submenuPosition} role="dialog" aria-label={t(picker === 'move' ? 'menu.move' : 'menu.chooseDate')}>

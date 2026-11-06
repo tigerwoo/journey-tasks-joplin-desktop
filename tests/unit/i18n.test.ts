@@ -193,3 +193,16 @@ test('user wording uses abandonment and date changes while legacy log keys remai
     assert.doesNotMatch(readFileSync(filename, 'utf8'), /\bskip\w*|跳[过過]|延期|postpon/i, filename);
   }
 });
+
+test('recovery notices name the affected note in every language without exposing recovery buttons', () => {
+  for (const locale of Object.keys(registry)) {
+    const t = createTranslator(locale);
+    for (const key of ['notice.firstDeleted', 'notice.firstGone', 'notice.completionWaiting', 'notice.completionGone']) {
+      const text = t(key, { title: 'Unique task title' });
+      assert.ok(text.includes('Unique task title'), `${locale}: ${key}`);
+      assert.doesNotMatch(text, /Retry next occurrence|重试生成下一期/, `${locale}: ${key}`);
+      assert.doesNotMatch(text, /尚未同步|这个|重新生成|重试生成/);
+    }
+    assert.doesNotMatch(t('backend.SERIES_NOTEBOOK_MISSING'), /Retry next occurrence|重试生成下一期/, locale);
+  }
+});

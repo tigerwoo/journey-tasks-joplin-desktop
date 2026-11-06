@@ -7,7 +7,7 @@ import { effectiveSchedule, validateTime, validateSchedule } from '../domain/dat
 import { projectView } from '../domain/projections';
 import { validateRule } from '../domain/recurrence';
 import { reduceSeries } from '../domain/series';
-import { planAdvance, ruleRevisionSchedule, snoozeCurrent, undoOccurrence } from '../domain/transitions';
+import { planAdvance, revisedPeriodCandidate, ruleRevisionSchedule, snoozeCurrent, undoOccurrence } from '../domain/transitions';
 import { createCalendarContext } from '../adapters/calendar';
 import { JoplinApiLike, JoplinGateway, NativeNote, NativeTag, StorageError } from '../adapters/joplin/gateway';
 import { REQUEST_RESULT_TTL_MS, LocalIntentStore, type LocalIntent } from '../adapters/joplin/localIntentStore';
@@ -19,11 +19,31 @@ import { readNamespace } from '../adapters/joplin/userDataStore';
 import { nativeFields, ProjectionExecutor, sameNative } from './projectionExecutor';
 import { occurrenceNativeFields, singleNativeFields } from './reminderService';
 import { CleanupService } from './cleanupService';
-import type { ActionResult, ApplicationCommand, ApplicationDiagnostic, ApplicationSnapshot, SeriesSummary, TaskInput, ViewQuery } from './applicationTypes';
+import type { ActionResult, ApplicationCommand, ApplicationDiagnostic, ApplicationSnapshot, SeriesSummary, TaskInput, ViewQuery, RestoreFirstTarget } from './applicationTypes';
+
+const TRASH_FOLDER_ID = 'de1e7ede1e7ede1e7ede1e7ede1e7ede';
+
+// Keep the gateway catalog intact for explicit metadata cleanup, including trash.
+function availableFolders(folders: Awaited<ReturnType<JoplinGateway['folders']>>) {
+  const excluded = new Set([TRASH_FOLDER_ID]);
+  for (const folder of folders) if (folder.deleted_time) excluded.add(folder.id);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const folder of folders) if (folder.parent_id && excluded.has(folder.parent_id) && !excluded.has(folder.id)) {
+      excluded.add(folder.id); changed = true;
+    }
+  }
+  return folders.filter(folder => !excluded.has(folder.id));
+}
 
 interface SeriesContext { noteId: string; meta: ControlMeta; operations: DomainOperation[]; snapshot: SeriesSnapshot; warning?: string }
 interface SingleContext { noteId: string; meta: ControlMeta; operations: SingleOperation[]; task: Task }
 interface WaitingCarrier { note: NativeNote; meta: CarrierMeta }
+interface EndedReceipt {
+  schemaVersion: 3; seriesId: string; anchorNoteId: string; ended: true; heads: string[];
+  tasks?: Task[]; ownerTaskId?: string;
+}
 interface PendingCompletion {
   schemaVersion: 3;
   pendingId: string;
@@ -42,7 +62,7 @@ export interface ApplicationOptions {
   randomId?: () => string;
   pluginId?: string;
   onChange?: () => void;
-  onNotice?: (message: string) => void;
+  onNotice?: (message: string, restore?: RestoreFirstTarget) => void;
 }
 const priorities: Priority[] = ['high', 'medium', 'low', 'none'];
 const randomId = (): string => {
@@ -66,7 +86,7 @@ export class TaskApplication {
   private readonly projector: ProjectionExecutor;
   private readonly onChange?: () => void;
   private readonly cleanup: CleanupService;
-  private readonly notice?: (message: string) => void;
+  private readonly notice?: (message: string, restore?: RestoreFirstTarget) => void;
   private series = new Map<string, SeriesContext>();
   private singles = new Map<string, SingleContext>();
   private native = new Map<string, NativeNote>();
@@ -135,6 +155,10 @@ export class TaskApplication {
   async snapshot(query: ViewQuery = {}): Promise<ApplicationSnapshot> {
     if (!this.initialized) throw new StorageError('NOT_INITIALIZED', '插件尚未初始化。');
     const preferences = await this.local.preferences();
+    const available = availableFolders(this.nativeFolders);
+    const validIds = new Set(available.map(folder => folder.id));
+    preferences.notebookIds = (preferences.notebookIds ?? []).filter(id => validIds.has(id));
+    if (!validIds.has(preferences.quickAddNotebookId ?? '')) preferences.quickAddNotebookId = '';
     this.defaultSeriesTitle = createTranslator(resolveLanguage(preferences.language, this.systemLocale || 'en-US'))('series.defaultTitle');
     const now = this.now();
     const deviceZone = query.deviceZone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -144,21 +168,21 @@ export class TaskApplication {
     const selected = ['today', 'tomorrow', 'sevenDays', 'inbox', 'all'].includes(view) ? today : query.date || today;
     const tasks = this.collectTasks(deviceZone).map(task => ({ ...task, tagIds: this.noteTagIds.get(task.noteId) || [] }));
     const selectedNotebooks = query.notebookIds ?? preferences.notebookIds ?? [];
-    const notebookIds = new Set(selectedNotebooks);
+    const notebookIds = new Set(selectedNotebooks.filter(id => validIds.has(id)));
     // Expand descendants to a fixed point; cycles and unordered folder responses are safe.
     let expanded = true;
     while (expanded) {
       expanded = false;
-      for (const folder of this.nativeFolders) if (folder.parent_id && notebookIds.has(folder.parent_id) && !notebookIds.has(folder.id)) {
+      for (const folder of available) if (folder.parent_id && notebookIds.has(folder.parent_id) && !notebookIds.has(folder.id)) {
         notebookIds.add(folder.id); expanded = true;
       }
     }
     const projected = projectView(tasks, [...this.series.values()].map(context => context.snapshot),
-      { view, selectedDate: selected, deviceZone, now, defaultTitle: this.defaultSeriesTitle, showCompleted: query.showCompleted ?? preferences.showCompleted, notebookId: query.notebookId, notebookIds: [...notebookIds], search: query.search, tagId: query.tagId }, this.calendar);
+      { view, selectedDate: selected, deviceZone, now, defaultTitle: this.defaultSeriesTitle, showCompleted: query.showCompleted ?? preferences.showCompleted, notebookId: query.notebookId && validIds.has(query.notebookId) ? query.notebookId : undefined, notebookIds: [...notebookIds], search: query.search, tagId: query.tagId }, this.calendar);
     const { range, items, truncated } = projected;
     const warnings = [...this.diagnostics.map(item => item.message), ...projected.warnings];
     if (truncated) warnings.push('diagnostic.forecastBudget');
-    const folders = this.nativeFolders.filter(folder => {
+    const folders = available.filter(folder => {
       try { const marker = readNamespace(folder.user_data, this.journal.pluginId).dataFolder; return !!marker?.d || marker?.v !== 1; }
       catch { return true; }
     });
@@ -189,7 +213,7 @@ export class TaskApplication {
             cleanupPlan: await this.cleanup.preview() };
           const cleanupResult = await this.cleanup.execute(command.token, command.confirmation);
           this.series.clear(); this.singles.clear(); this.native.clear();
-          this.waitingCarriers.clear(); this.pending.clear(); this.requestResults.clear(); this.diagnostics = [];
+          this.waitingCarriers.clear(); this.pending.clear(); this.anchorObservations.clear(); this.stoppedTasks.clear(); this.requestResults.clear(); this.diagnostics = [];
           await this.refreshInternal(true);
           this.onChange?.();
           return { requestId: command.requestId, status: 'saved', snapshotVersion: this.version, cleanupResult };
@@ -214,6 +238,9 @@ export class TaskApplication {
             const visible = new Set(versions.map(note => note.id));
             const changed = versions.filter(note => {
               const previous = this.scanNotes.get(note.id);
+              // Full scans omit Trash. Unknown already-deleted notes are not
+              // new live data; known deletions and restored notes still refresh.
+              if (!previous && note.deleted_time) return false;
               return !previous || ['updated_time', 'deleted_time', 'encryption_applied', 'is_conflict'].some(key =>
                 (note[key as keyof typeof note] || 0) !== (previous[key as keyof NativeNote] || 0));
             }).map(note => note.id);
@@ -221,13 +248,16 @@ export class TaskApplication {
             // Folder order/settings and hierarchy can change without any note edit.
             const folders = await this.gateway.folders();
             const foldersChanged = stableStringify(folders) !== stableStringify(this.nativeFolders);
+            const previousIds = new Set(availableFolders(this.nativeFolders).map(folder => folder.id));
+            const nextIds = availableFolders(folders).map(folder => folder.id);
+            const availabilityChanged = previousIds.size !== nextIds.length || nextIds.some(id => !previousIds.has(id));
             this.nativeFolders = folders;
             this.lastChangeCheck = now;
-            if (!changed.length) {
+            if (!changed.length && !availabilityChanged) {
               if (foldersChanged) { this.version++; this.onChange?.(); }
               return { requestId: command.requestId, status: 'saved', snapshotVersion: this.version };
             }
-            this.refreshNoteIds = changed;
+            this.refreshNoteIds = availabilityChanged ? undefined : changed;
           }
           if (command.noteIds?.length && this.dataReady && !this.diagnostics.length) {
             const signature = (note: NativeNote | undefined | null) => note && stableStringify(Object.fromEntries(Object.entries(note).filter(([key]) => !['body', 'type_'].includes(key))));
@@ -267,7 +297,7 @@ export class TaskApplication {
           if (output.noteId) ids.add(output.noteId);
           const seriesId = output.seriesId || ('seriesId' in command ? command.seriesId : undefined);
           if (seriesId) { const context = this.series.get(seriesId); if (context) ids.add(context.noteId); }
-          this.refreshNoteIds = ids.size ? this.relatedNoteIds([...ids]) : undefined;
+          this.refreshNoteIds = command.action === 'restoreFirstNote' ? undefined : ids.size ? this.relatedNoteIds([...ids]) : undefined;
           try { await this.refreshInternal(true); }
           finally { this.refreshNoteIds = undefined; }
         }
@@ -275,7 +305,7 @@ export class TaskApplication {
         result = { requestId: command.requestId, status: 'saved', snapshotVersion: this.version, ...output };
       } catch (error) {
         const code = error instanceof StorageError ? error.code : 'COMMAND_FAILED';
-        this.addDiagnostic(code, errorMessage(error));
+        if (command.action !== 'restoreFirstNote') this.addDiagnostic(code, errorMessage(error));
         this.version++;
         result = { requestId: command.requestId, status: /CONFLICT|CHANGED|STALE|MISSING_PARENT/.test(code) ? 'conflict' : 'error',
           snapshotVersion: this.version, code, message: errorMessage(error) };
@@ -325,7 +355,7 @@ export class TaskApplication {
       accounted.add(context.meta.rootNoteId);
       const note = this.native.get(context.task.noteId);
       if (!note || note.deleted_time || note.encryption_applied || context.task.managed === false || this.findSeries(context.task.noteId)) continue;
-      tasks.push({ ...context.task, createdAt: note.created_time || context.task.createdAt, nativeTitle: note.title, title: note.title, notebookId: note.parent_id });
+      tasks.push({ ...context.task, createdAt: context.meta.stoppedSeriesId ? context.task.createdAt : note.created_time || context.task.createdAt, nativeTitle: note.title, title: note.title, notebookId: note.parent_id });
     }
     for (const context of this.series.values()) {
       accounted.add(context.meta.rootNoteId);
@@ -336,6 +366,8 @@ export class TaskApplication {
         const note = this.native.get(occurrence.carrierNoteId);
         if (!note || note.deleted_time || note.encryption_applied) continue;
         if (occurrence.withdrawn || (occurrence.historyDeleted && occurrence.consumed && occurrence.occurrenceId !== snapshot.activeOccurrenceId)) continue;
+        const independent = [...this.singles.values()].find(single => single.noteId === note.id && single.meta.stoppedSeriesId === snapshot.seriesId);
+        if (snapshot.status === 'ended' && independent && this.carrierOwner(snapshot, note.id)?.occurrenceId === occurrence.occurrenceId) continue;
         const definition = snapshot.definition;
         tasks.push({ createdAt: this.native.get(context.meta.rootNoteId)?.created_time, historical: occurrence.consumed && occurrence.occurrenceId !== snapshot.activeOccurrenceId, taskId: occurrence.occurrenceId, nativeTitle: note.title, noteId: note.id, title: this.seriesTitle(context), notebookId: note.parent_id,
           tagIds: definition?.sourceTagIds || [], schedule: effectiveSchedule(occurrence),
@@ -357,6 +389,17 @@ export class TaskApplication {
         reminderOverride: source?.reminderOverride, completedAt: pending?.evidence.at || note.todo_completed || 0,
         resolution: pending?.evidence.action === 'skip' ? 'skipped' : pending || note.todo_completed ? 'completed' : 'open', managed: true });
     }
+    for (const receipt of this.stoppedTasks.values()) {
+      if (this.series.has(receipt.seriesId)) continue;
+      for (const saved of receipt.tasks || []) {
+        const note = this.native.get(saved.noteId);
+        if (!note || !note.is_todo || note.deleted_time || note.encryption_applied || note.is_conflict) continue;
+        const independent = [...this.singles.values()].find(single => single.noteId === note.id && single.meta.stoppedSeriesId === receipt.seriesId);
+        if (accounted.has(note.id) && (!independent || saved.taskId === receipt.ownerTaskId)) continue;
+        tasks.push(this.retainedTask(saved, note, saved.taskId === receipt.ownerTaskId));
+      }
+      for (const task of receipt.tasks || []) accounted.add(task.noteId);
+    }
     for (const note of this.native.values()) {
       if (!note.is_todo || accounted.has(note.id) || note.deleted_time || note.encryption_applied || note.is_conflict) continue;
       tasks.push(this.importedTask(note, deviceZone));
@@ -375,23 +418,23 @@ export class TaskApplication {
       title: this.seriesTitle(context), status: context.snapshot.status,
       definition: context.snapshot.definition,
       revisionIds: context.snapshot.revisionHeads,
+      advanceChoices: context.operations.filter((op): op is Extract<DomainOperation, { kind: 'Advance' }> => op.kind === 'Advance' && context.snapshot.conflicts.some(c => c.code === 'advance' && c.opIds.includes(op.opId))).map(op => ({ opId: op.opId, date: op.payload.next?.scheduled.date || '', noteId: op.payload.next?.carrierNoteId || '', title: this.native.get(op.payload.next?.carrierNoteId || '')?.title || this.seriesTitle(context) })),
       revisionChoices: context.snapshot.operations.filter((op): op is Extract<DomainOperation, { kind: 'CreateSeries' | 'ReviseSeries' | 'ResolveSeriesConflict' }> =>
         ['CreateSeries', 'ReviseSeries', 'ResolveSeriesConflict'].includes(op.kind) && context.snapshot.revisionHeads.includes(op.opId)).map(op => op.payload.definition),
+      resumeUnavailable: context.snapshot.status === 'ended' && !!context.snapshot.activeOccurrenceId && !this.native.has(context.snapshot.occurrences[context.snapshot.activeOccurrenceId]!.carrierNoteId),
       activeOccurrenceId: context.snapshot.activeOccurrenceId, consumedCount: context.snapshot.consumedCount,
       occurrences: Object.values(context.snapshot.occurrences), conflicts: context.snapshot.conflicts, warning: context.warning,
       warningCode: context.warning ? this.diagnostics.find(item => item.seriesId === context.meta.seriesId && item.message === context.warning)?.code || 'SERIES_CONFLICT' : undefined,
       anchorNoteId: context.meta.rootNoteId, pendingCompletion: [...this.pending.values()].some(item => item.evidence.seriesId === context.meta.seriesId) }));
-    for (const [seriesId, carriers] of this.waitingCarriers) {
-      if (this.series.has(seriesId)) continue;
-      const first = carriers[0]!;
-      summaries.push({ seriesId, controlNoteId: first.meta.anchorNoteId, anchorNoteId: first.meta.anchorNoteId,
-        title: first.note.title, status: 'waiting', revisionIds: [], revisionChoices: [], occurrences: [], conflicts: [], consumedCount: 0,
-        activeOccurrenceId: first.meta.occurrenceId, pendingCompletion: [...this.pending.values()].some(item => item.evidence.seriesId === seriesId),
-        warningCode: 'ANCHOR_MISSING', warning: '首篇任务缺失或尚未同步。请恢复同一篇任务后重试推进；不会自动创建替代首篇。' });
-    }
     return summaries;
   }
 
+  private readonly unavailableNotices = new Set<string>();
+  private readonly pluginDeletedNotes = new Set<string>();
+  private readonly anchorObservations = new Map<string, { noteId: string; title: string; available: boolean }>();
+  private readonly endedSeries = new Set<string>();
+  private readonly stoppedTasks = new Map<string, EndedReceipt>();
+  private anchorReads = new Map<string, Promise<{ note: NativeNote | null; status?: SeriesSnapshot['status'] }>>();
   private nativeFolders: Awaited<ReturnType<JoplinGateway['folders']>> = [];
   private nativeTags: NativeTag[] = [];
   private scanNotes = new Map<string, NativeNote>();
@@ -435,7 +478,17 @@ export class TaskApplication {
   }
 
   private async loadState(reload = false): Promise<void> {
+    this.anchorReads.clear();
+    this.endedSeries.clear();
+    for (const context of this.series.values()) {
+      if (context.snapshot.status === 'ended') this.anchorObservations.delete(context.meta.seriesId);
+      else if (!this.anchorObservations.has(context.meta.seriesId)) this.anchorObservations.set(context.meta.seriesId, {
+        noteId: context.meta.rootNoteId, title: this.native.get(context.meta.rootNoteId)?.title || this.seriesTitle(context), available: true,
+      });
+    }
     const fullScan = !this.refreshNoteIds;
+    if (fullScan) this.stoppedTasks.clear();
+    else for (const [key, receipt] of this.stoppedTasks) if (receipt.tasks?.some(task => this.refreshNoteIds!.includes(task.noteId))) this.stoppedTasks.delete(key);
     if (this.refreshNoteIds) {
       const loaded = new Set<string>();
       for (let index = 0; index < this.refreshNoteIds.length; index++) {
@@ -453,7 +506,10 @@ export class TaskApplication {
       this.nativeFolders = await this.gateway.folders();
       this.noteTagIds.clear();
     }
-    this.native = new Map([...this.scanNotes].filter(([, note]) => note.is_todo || note.user_data?.includes(JSON.stringify(this.journal.pluginId))));
+    const availableIds = new Set(availableFolders(this.nativeFolders).map(folder => folder.id));
+    const deletedFolderIds = new Set([TRASH_FOLDER_ID, ...this.nativeFolders.filter(folder => !availableIds.has(folder.id)).map(folder => folder.id)]);
+    this.native = new Map([...this.scanNotes].filter(([, note]) => !deletedFolderIds.has(note.parent_id) &&
+      (note.is_todo || note.user_data?.includes(JSON.stringify(this.journal.pluginId)))));
     if (fullScan) {
       for (const note of this.native.values()) if (note.is_todo && !note.deleted_time && !note.encryption_applied) this.noteTagIds.set(note.id, []);
       for (const tag of this.nativeTags) {
@@ -518,6 +574,14 @@ export class TaskApplication {
         this.addDiagnostic('OVERLAPPING_SERIES', context.warning, id);
       }
     }
+    for (const note of this.native.values()) {
+      if (note.deleted_time || note.encryption_applied || note.is_conflict) continue;
+      if (affected && !affected.has(note.id)) continue;
+      for (const key of (await this.journal.userData.keys(note)).filter(key => key.startsWith('v3:ended:'))) {
+        const receipt = await this.journal.userData.fromNote<EndedReceipt>(note, key);
+        if (receipt?.schemaVersion === 3 && receipt.ended && typeof receipt.seriesId === 'string' && key === this.endedKey(receipt.seriesId)) this.rememberStoppedTasks(receipt, note.id);
+      }
+    }
     const latestCarriers = new Map<string, WaitingCarrier>();
     for (const carrier of discovered.carriers) {
       const key = `${carrier.meta.seriesId}:${carrier.note.id}`;
@@ -526,10 +590,10 @@ export class TaskApplication {
     }
     for (const carrier of latestCarriers.values()) {
       if (!this.series.has(carrier.meta.seriesId)) {
+        if (await this.carrierSeriesEnded(carrier)) continue;
         const consumed = await this.journal.userData.get(carrier.note.id, this.consumedKey(carrier.meta.seriesId, carrier.meta.occurrenceId));
         if (consumed) continue;
         this.waitingCarriers.set(carrier.meta.seriesId, [...(this.waitingCarriers.get(carrier.meta.seriesId) || []), carrier]);
-        this.addDiagnostic('ANCHOR_MISSING', '首篇任务缺失或尚未同步。请恢复同一篇任务后重试推进；不会自动创建替代首篇。', carrier.meta.seriesId, carrier.note.id);
       }
     }
     for (const note of this.native.values()) {
@@ -545,11 +609,147 @@ export class TaskApplication {
           continue;
         }
         if (await this.journal.userData.get(note.id, `v3:pending-imported:${evidence.pendingId}`)) continue;
+        const owner = this.series.get(evidence.seriesId);
+        if (owner?.snapshot.status === 'ended' || (!owner && await this.carrierSeriesEnded({ note, meta: {
+          schemaVersion: 3, role: 'carrier', seriesId: evidence.seriesId, anchorNoteId: evidence.anchorNoteId,
+          occurrenceId: evidence.occurrenceId, creationHash: '',
+        } }))) continue;
         this.pending.set(evidence.pendingId, { note, evidence });
-        const context = this.series.get(evidence.seriesId);
-        if (context) { context.snapshot.status = 'waiting'; context.warning = '当前完成已保存，下一周期尚未生成。恢复首篇任务后，请点击重试推进。'; }
-        this.addDiagnostic('ANCHOR_MISSING_PENDING', '当前完成已保存，下一周期尚未生成。恢复首篇任务后，请点击重试推进。', evidence.seriesId, note.id);
       }
+    }
+    await this.observeAnchorDeletions();
+  }
+
+  private carrierOwner(snapshot: SeriesSnapshot, noteId: string): Occurrence | undefined {
+    return Object.values(snapshot.occurrences).filter(row => row.carrierNoteId === noteId && !row.withdrawn)
+      .sort((a, b) => Number(b.occurrenceId === snapshot.activeOccurrenceId) - Number(a.occurrenceId === snapshot.activeOccurrenceId) || b.carrierGeneration - a.carrierGeneration)[0];
+  }
+
+  private retainedTask(saved: Task, note: NativeNote, owner: boolean): Task {
+    return { ...saved, title: note.title, nativeTitle: note.title, notebookId: note.parent_id,
+      ...(owner ? { completedAt: note.todo_completed || 0, resolution: note.todo_completed ? saved.resolution === 'skipped' ? 'skipped' : 'completed' : 'open',
+        reminderOverride: note.todo_due || 0 } : {}) };
+  }
+
+  private rememberStoppedTasks(receipt: EndedReceipt, noteId: string): boolean {
+    if (!Array.isArray(receipt.tasks) || !receipt.ownerTaskId) return false;
+    if (receipt.tasks.some(task => !task || typeof task !== 'object' || task.noteId !== noteId || typeof task.taskId !== 'string' ||
+      !task.schedule || validateSchedule(task.schedule, this.calendar).length || !priorities.includes(task.priority) ||
+      !Number.isFinite(task.completedAt) || typeof task.reminder?.enabled !== 'boolean')) return false;
+    this.stoppedTasks.set(`${receipt.seriesId}:${noteId}`, receipt);
+    return true;
+  }
+
+  private endedKey(seriesId: string): string { return `v3:ended:${stableHash(seriesId)}`; }
+
+  private readAnchor(seriesId: string, noteId: string) {
+    const key = `${seriesId}:${noteId}`;
+    if (!this.anchorReads.has(key)) this.anchorReads.set(key, (async () => {
+      const note = await this.gateway.getNote(noteId);
+      if (!note || note.encryption_applied || note.is_conflict) return { note };
+      try {
+        const operations = await this.journal.operations<DomainOperation>(note, seriesId);
+        return { note, status: reduceSeries(operations).status };
+      } catch { return { note }; } // Incomplete journals never authorize recovery writes.
+    })());
+    return this.anchorReads.get(key)!;
+  }
+
+  /** Keep an ended-series receipt on surviving members before its first note can be removed. */
+  private async persistSeriesLifecycle(context: SeriesContext): Promise<void> {
+    const ended = context.snapshot.status === 'ended';
+    const key = this.endedKey(context.meta.seriesId);
+    const heads = operationHeads(context.operations).sort();
+    const lifecycleNote = (id: string) => !this.gateway.changedNoteIds.has(id) && this.scanNotes.has(id)
+      ? Promise.resolve(this.scanNotes.get(id)!) : this.gateway.getNote(id, false);
+    const root = await lifecycleNote(context.meta.rootNoteId);
+    const definition = context.snapshot.definition;
+    const ids = new Set(Object.values(context.snapshot.occurrences).map(row => row.carrierNoteId));
+    for (const id of ids) {
+      const note = id === root?.id ? root : await lifecycleNote(id);
+      if (!note || note.deleted_time || note.encryption_applied || note.is_conflict) continue;
+      const prior = await this.journal.userData.fromNote<EndedReceipt>(note, key);
+      // Native titles, tags and locations are overlaid at read time. A receipt
+      // only needs rebuilding when its domain journal changes or it is legacy.
+      if (ended && prior?.schemaVersion === 3 && prior.seriesId === context.meta.seriesId &&
+        prior.anchorNoteId === context.meta.rootNoteId && prior.ended && prior.ownerTaskId === id &&
+        prior.tasks?.length && stableStringify(prior.heads) === stableStringify(heads)) {
+        if (this.rememberStoppedTasks(prior, id)) continue;
+      }
+      const owner = this.carrierOwner(context.snapshot, id);
+      const tasks: Task[] = Object.values(context.snapshot.occurrences)
+        .filter(row => row.carrierNoteId === id && !row.withdrawn && !(row.historyDeleted && row.consumed && row.occurrenceId !== context.snapshot.activeOccurrenceId))
+        .map(row => {
+          const ownsNote = row.occurrenceId === owner?.occurrenceId;
+          return { taskId: ownsNote ? id : row.occurrenceId, noteId: id, title: this.seriesTitle(context, root?.title), nativeTitle: note.title,
+            createdAt: root?.created_time || note.created_time, notebookId: note.parent_id, tagIds: this.noteTagIds.get(id) || definition?.sourceTagIds || [],
+            schedule: effectiveSchedule(row), completedAt: row.resolution === 'open' ? 0 : row.resolvedAt || 1,
+            resolution: row.resolution, priority: definition?.priority || 'none', pinned: row.pinned || false,
+            reminder: ownsNote && row.occurrenceId === context.snapshot.activeOccurrenceId ? definition?.reminder || { enabled: false } : { enabled: false },
+            reminderOverride: ownsNote ? note.todo_due || 0 : 0, managed: true, historical: !ownsNote,
+            ...(!ownsNote ? { occurrenceId: row.occurrenceId } : {}) };
+        });
+      const receipt: EndedReceipt = { schemaVersion: 3, seriesId: context.meta.seriesId, anchorNoteId: context.meta.rootNoteId,
+        ended: true, heads, tasks, ownerTaskId: id };
+      if (ended && stableStringify(prior ?? null) !== stableStringify(receipt)) {
+        await this.gateway.api.data.userDataSet(1, id, key, receipt);
+        const after = await this.journal.userData.get(id, key);
+        if (stableStringify(after ?? null) !== stableStringify(receipt)) throw new StorageError('USERDATA_READBACK', '系列结束状态保存失败，请重试结束重复。');
+        this.gateway.changedNoteIds.add(id);
+      } else if (!ended && prior) {
+        await this.gateway.api.data.userDataDelete(1, id, key);
+        this.stoppedTasks.delete(`${context.meta.seriesId}:${id}`);
+        this.gateway.changedNoteIds.add(id);
+      }
+      if (ended) this.rememberStoppedTasks(receipt, id);
+    }
+  }
+
+  private async carrierSeriesEnded(carrier: WaitingCarrier): Promise<boolean> {
+    if (this.endedSeries.has(carrier.meta.seriesId)) return true;
+    const { note: anchor, status } = await this.readAnchor(carrier.meta.seriesId, carrier.meta.anchorNoteId);
+    if (status === 'ended') {
+      this.endedSeries.add(carrier.meta.seriesId);
+      // Backfill old stopped series while the first note is still readable in Trash.
+      const operations = await this.journal.operations<DomainOperation>(anchor!, carrier.meta.seriesId);
+      await this.persistSeriesLifecycle({ noteId: anchor!.id, meta: { schemaVersion: 3, role: 'series',
+        seriesId: carrier.meta.seriesId, rootNoteId: anchor!.id }, operations, snapshot: reduceSeries(operations) });
+      return true;
+    }
+    if (anchor && status) return false; // A readable first note is the authority after an explicit restore.
+    const value = await this.journal.userData.fromNote<EndedReceipt>(carrier.note, this.endedKey(carrier.meta.seriesId));
+    const ended = value?.schemaVersion === 3 && value.seriesId === carrier.meta.seriesId &&
+      value.anchorNoteId === carrier.meta.anchorNoteId && value.ended === true && Array.isArray(value.heads) && value.heads.length > 0;
+    if (ended) this.endedSeries.add(carrier.meta.seriesId);
+    return ended;
+  }
+
+  private async recoveryNotice(key: string, title: string, restore?: RestoreFirstTarget): Promise<void> {
+    if (this.loading) return; // Start-up reconciles state silently, including offline restorations.
+    this.notice?.(createTranslator(await this.interfaceLocale())(key, { title }), restore);
+  }
+
+  private async observeAnchorDeletions(): Promise<void> {
+    for (const context of this.series.values()) {
+      if (context.snapshot.status === 'ended') { this.anchorObservations.delete(context.meta.seriesId); continue; }
+      const note = this.native.get(context.meta.rootNoteId);
+      if (note && !note.deleted_time) {
+        this.pluginDeletedNotes.delete(note.id);
+        this.anchorObservations.set(context.meta.seriesId, { noteId: note.id, title: note.title, available: true });
+      }
+    }
+    for (const [seriesId, observed] of this.anchorObservations) {
+      if (this.endedSeries.has(seriesId)) { this.anchorObservations.delete(seriesId); continue; }
+      if (this.series.has(seriesId)) continue;
+      const { note, status } = await this.readAnchor(seriesId, observed.noteId);
+      if (status === 'ended') { this.anchorObservations.delete(seriesId); continue; }
+      const available = !!note && !note.deleted_time && !note.encryption_applied && !note.is_conflict;
+      if (available) this.pluginDeletedNotes.delete(observed.noteId);
+      if (observed.available && !available && (!note || note.deleted_time) && !this.pluginDeletedNotes.has(observed.noteId))
+        await this.recoveryNotice(note ? 'notice.firstDeleted' : 'notice.firstGone', note?.title || observed.title,
+          note?.deleted_time && !note.encryption_applied && !note.is_conflict && status ? { noteId: observed.noteId, seriesId } : undefined);
+      observed.available = available;
+      if (note?.title) observed.title = note.title;
     }
   }
 
@@ -583,11 +783,16 @@ export class TaskApplication {
       for (const carriers of this.waitingCarriers.values()) for (const carrier of carriers) {
         if (!carrier.note.todo_completed && ![...this.pending.values()].some(item => item.evidence.noteId === carrier.note.id && item.evidence.occurrenceId === carrier.meta.occurrenceId)) continue;
         try { await this.savePendingCompletion(carrier); }
-        catch (error) { this.addDiagnostic('PENDING_COMPLETION', errorMessage(error), carrier.meta.seriesId, carrier.note.id); }
+        catch (error) { this.addDiagnostic(error instanceof StorageError ? error.code : 'COMMAND_FAILED', errorMessage(error), carrier.meta.seriesId, carrier.note.id); }
       }
       for (const context of [...this.series.values()]) {
         if (affected && !affected.has(context.noteId)) continue;
-        try { await this.reconcileSeries(context); }
+        try {
+          const pending = [...this.pending.values()].filter(item => item.evidence.seriesId === context.meta.seriesId)
+            .sort((a, b) => a.evidence.operationIdentity.opId.localeCompare(b.evidence.operationIdentity.opId));
+          if (pending.length && context.snapshot.status === 'active') await this.resumePending(context, pending);
+          await this.reconcileSeries(context);
+        }
         catch (error) { context.warning = errorMessage(error); this.addDiagnostic(error instanceof StorageError ? error.code : 'SERIES_RECONCILE', context.warning, context.meta.seriesId); }
       }
       for (const context of [...this.singles.values()]) {
@@ -619,6 +824,7 @@ export class TaskApplication {
     await this.journal.append(context.noteId, operation, context.meta.seriesId);
     context.operations.push(operation);
     context.snapshot = reduceSeries(context.operations);
+    if (kind === 'StopOrDelete' || kind === 'Restore') await this.persistSeriesLifecycle(context);
     return operation;
   }
   private async singleOperation(context: SingleContext, kind: SingleOperation['kind'], payload: unknown): Promise<SingleOperation> {
@@ -648,7 +854,7 @@ export class TaskApplication {
   private assertPriority(priority: Priority | undefined): void {
     if (priority !== undefined && !priorities.includes(priority)) throw new StorageError('INVALID_PRIORITY', '无效优先级。');
   }
-  private async interfaceLocale(): Promise<string> {
+  async interfaceLocale(): Promise<string> {
     const preferences = await this.local.preferences();
     return resolveLanguage(preferences.language, this.systemLocale);
   }
@@ -675,7 +881,7 @@ export class TaskApplication {
     return occurrence;
   }
   private findSeries(noteId: string): SeriesContext | undefined {
-    return [...this.series.values()].find(context => (Object.values(context.snapshot.occurrences).some(item => item.carrierNoteId === noteId) || context.operations.some(op => op.kind === 'BindCarrier' && op.payload.noteId === noteId)));
+    return [...this.series.values()].find(context => !(context.snapshot.status === 'ended' && [...this.singles.values()].some(single => single.noteId === noteId && single.meta.stoppedSeriesId === context.meta.seriesId)) && (Object.values(context.snapshot.occurrences).some(item => item.carrierNoteId === noteId) || context.operations.some(op => op.kind === 'BindCarrier' && op.payload.noteId === noteId)));
   }
   private async requireNative(noteId: string): Promise<NativeNote> {
     const note = await this.gateway.getNote(noteId);
@@ -690,10 +896,12 @@ export class TaskApplication {
     const note = await this.requireNative(noteId);
     if (!note.is_todo) throw new StorageError('NOT_TODO', '只管理原生待办笔记，不会转换普通笔记。');
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const task = { ...this.importedTask(note, zone), managed: true };
+    const stopped = [...this.stoppedTasks.values()].find(receipt => receipt.tasks?.some(task => task.noteId === noteId && task.taskId === receipt.ownerTaskId));
+    const saved = stopped?.tasks?.find(task => task.taskId === stopped.ownerTaskId);
+    const task = saved ? this.retainedTask(saved, note, true) : { ...this.importedTask(note, zone), managed: true };
     task.tagIds = await this.gateway.noteTags(noteId);
     const seriesId = stableHash(['journey-single', note.id]);
-    const meta: ControlMeta = { schemaVersion: 3, role: 'single', seriesId, rootNoteId: note.id };
+    const meta: ControlMeta = { schemaVersion: 3, role: 'single', seriesId, rootNoteId: note.id, ...(stopped ? { stoppedSeriesId: stopped.seriesId } : {}) };
     this.journal.registerAnchor(seriesId, note.id);
     await this.journal.createControl(meta);
     const context: SingleContext = { noteId: this.journal.controlId(seriesId), meta, operations: [], task };
@@ -729,18 +937,20 @@ export class TaskApplication {
       }
       case 'deleteNativeTask': {
         const series = this.findSeries(command.noteId);
+        let deletedHistory = false;
         if (series) {
           const occurrence = command.occurrenceId
             ? this.requireOccurrence(series, command.occurrenceId) : this.occurrenceForNote(series, command.noteId);
           if (occurrence.carrierNoteId !== command.noteId) throw new StorageError('OCCURRENCE_MISSING', '任务周期不可用。');
           const historical = occurrence.consumed && occurrence.occurrenceId !== series.snapshot.activeOccurrenceId;
+          deletedHistory = historical;
           if (historical) {
             await this.operation(series, 'ActOccurrence', { action: 'deleteHistory', occurrenceId: occurrence.occurrenceId });
             // Continuous history shares its carrier with other cycles. Keep that note intact,
             // including across mode changes; only remove this history row.
             if (Object.values(series.snapshot.occurrences).some(row => row.occurrenceId !== occurrence.occurrenceId && row.carrierNoteId === command.noteId))
               return { noteId: command.noteId };
-          } else await this.operation(series, 'StopOrDelete', { scope: 'stop' });
+          }
         }
         else await this.singleOperation(await this.adoptSingle(command.noteId), 'SingleDelete', {});
         for (const intent of await this.local.all()) if (intent.create?.noteId === command.noteId) {
@@ -749,7 +959,15 @@ export class TaskApplication {
           // Keep a body-free creation tombstone: a stale request can never authorize recreating a deleted root.
           await this.local.put({ ...intent, phase: intent.create.role === 'root' ? 'root-saved' : 'carrier-saved', create: undefined, command: undefined });
         }
-        await this.gateway.deleteNote(command.noteId, false);
+        // The panel confirmation already explains deletion of a historical first
+        // note. Suppress only this transition; observing restoration rearms it.
+        if (series?.meta.rootNoteId === command.noteId && deletedHistory) this.pluginDeletedNotes.add(command.noteId);
+        try { await this.gateway.deleteNote(command.noteId, false); }
+        catch (error) {
+          const note = await this.gateway.getNote(command.noteId, false);
+          if (note && !note.deleted_time) this.pluginDeletedNotes.delete(command.noteId);
+          throw error;
+        }
         return { noteId: command.noteId };
       }
       case 'editTask': {
@@ -812,6 +1030,9 @@ export class TaskApplication {
         return { noteId: command.noteId };
       }
       case 'complete': case 'skip': case 'reopen': {
+        if (!command.seriesId && command.noteId && command.occurrenceId && [...this.stoppedTasks.values()].some(receipt =>
+          receipt.tasks?.some(task => task.noteId === command.noteId && task.occurrenceId === command.occurrenceId && task.historical)))
+          throw new StorageError('HISTORICAL_TASK', '共享笔记的历史周期不能修改当前任务。');
         if (command.action === 'complete') {
           const association = await this.findCarrierAssociation(command.seriesId, command.occurrenceId, command.noteId);
           if (association) {
@@ -859,9 +1080,61 @@ export class TaskApplication {
         return { noteId: command.noteId };
       }
       case 'reviseSeries': {
-        const context = this.context(command.seriesId);
+        const target = this.series.get(command.seriesId)?.snapshot.definition?.sourceNotebookId;
+        const notebookRepair = this.diagnostics.some(item => item.seriesId === command.seriesId && item.code === 'SERIES_NOTEBOOK_MISSING') ||
+          (!!target && !availableFolders(this.nativeFolders).some(folder => folder.id === target));
+        const context = this.context(command.seriesId, notebookRepair);
+        if (notebookRepair) {
+          context.snapshot = reduceSeries(context.operations);
+          if (context.snapshot.status !== 'active') throw new StorageError('SERIES_CONFLICT', '请先解决系列规则冲突。');
+          context.warning = undefined;
+        }
         if (context.snapshot.definition?.revisionId !== command.revisionId) throw new StorageError('STALE_REVISION', '系列规则已改变，请重新打开编辑。');
-        await this.revise(context, command.definition, command.currentSchedule, command.moveSeries);
+        // Saving through the series editor is the explicit way to resume a stopped
+        // series. Reopening a task, refreshing or restoring its note must not do it.
+        const restored = new Set(context.operations.flatMap(op => op.kind === 'Restore' ? op.payload.targetOpIds : []));
+        const stopped = context.snapshot.status === 'ended'
+          ? context.operations.filter(op => op.kind === 'StopOrDelete' && op.payload.scope !== 'history' && !restored.has(op.opId)).map(op => op.opId)
+          : [];
+        if (stopped.length) {
+          const current = context.snapshot.occurrences[context.snapshot.activeOccurrenceId || ''];
+          if (current) {
+            const native = await this.gateway.getNote(current.carrierNoteId);
+            if (!native || native.deleted_time || native.encryption_applied || native.is_conflict)
+              throw new StorageError('SERIES_CURRENT_UNAVAILABLE', '当前任务笔记不可用，请先在 Joplin 中恢复或处理。若已永久删除，请新建重复任务。');
+          }
+          const changed = stableStringify(command.definition.rule) !== stableStringify(context.snapshot.definition!.rule) ||
+            stableStringify(command.definition.anchor) !== stableStringify(context.snapshot.definition!.anchor);
+          if (!current || current.resolution !== 'open' || changed) {
+            const history = Object.values(context.snapshot.occurrences).filter(row => !row.withdrawn && (row.consumed || row === current && row.resolution !== 'open'))
+              .sort((a, b) => a.carrierGeneration - b.carrierGeneration);
+            const candidate = current && current.resolution !== 'open' && !changed
+              ? planAdvance({ ...context.snapshot, status: 'active', definition: command.definition }, current.resolvedAt || this.now(), this.calendar, 'preview').next
+              : revisedPeriodCandidate(command.definition, history, this.calendar, context.snapshot.consumedCount + (current && !current.consumed && current.resolution !== 'open' ? 1 : 0));
+            if (!candidate) throw new StorageError('SERIES_NO_DATE', '新规则没有可生成的日期，请调整次数或截止日期。');
+          }
+        }
+        const generated = await this.revise(context, command.definition, command.currentSchedule, command.moveSeries);
+        if (stopped.length || (context.snapshot.status === 'active' &&
+          [...this.stoppedTasks.values()].some(receipt => receipt.seriesId === context.meta.seriesId))) {
+          try {
+            if (stopped.length) {
+              await this.operation(context, 'Restore', { targetOpIds: stopped });
+              const current = context.snapshot.occurrences[context.snapshot.activeOccurrenceId || ''];
+              if (current && !(await this.requireNative(current.carrierNoteId)).is_todo) await this.projectOccurrence(context, current, true);
+            }
+            // The restore may already be durable after a failed acknowledgement
+            // or receipt cleanup. A second save finishes cleanup without restoring twice.
+            else await this.persistSeriesLifecycle(context);
+          }
+          catch (error) {
+            const message = `规则已保存，但恢复重复尚未确认。请刷新后重新保存。${errorMessage(error)}`;
+            throw new StorageError('SERIES_RESUME_PENDING', message);
+          }
+        }
+        if (generated && context.snapshot.status === 'active' && context.snapshot.activeOccurrenceId &&
+          context.snapshot.occurrences[context.snapshot.activeOccurrenceId]?.resolution !== 'open')
+          await this.advanceIfNeeded(context, undefined, generated);
         return { seriesId: command.seriesId };
       }
       case 'switchMode': {
@@ -877,22 +1150,24 @@ export class TaskApplication {
         const identity = await this.local.nextId();
         const definition = { ...clone(command.definition), revisionId: identity.opId, parentRevisionIds: ids, seriesId: command.seriesId };
         this.checkDefinition(definition);
-        const occurrence = this.requireOccurrence(context);
-        const schedule = this.normalizeSchedule(command.currentSchedule || occurrence.scheduled) as DatedSchedule;
+        const occurrence = context.snapshot.occurrences[context.snapshot.activeOccurrenceId || ''];
+        const schedule = command.currentSchedule ? ruleRevisionSchedule(this.calendar, this.normalizeSchedule(command.currentSchedule) as DatedSchedule) : undefined;
         await this.operation(context, 'ResolveSeriesConflict', { definition, resolvedRevisionIds: ids,
-          current: { occurrenceId: occurrence.occurrenceId, schedule, slotKey: candidateSlotKey(definition, schedule) } }, identity);
+          ...(schedule && occurrence ? { current: { occurrenceId: occurrence.occurrenceId, schedule, slotKey: candidateSlotKey(definition, schedule) } } : {}) }, identity);
         return { seriesId: command.seriesId };
       }
       case 'deleteTask': {
         const context = command.seriesId ? this.context(command.seriesId, true) : this.findSeries(command.noteId);
         if (context) {
-          const scope = command.scope || 'current';
-          const current = this.requireOccurrence(context);
-          await this.operation(context, 'StopOrDelete', { scope, occurrenceId: current.occurrenceId });
+          const scope = command.scope;
+          if (!scope || !['stop', 'history'].includes(scope)) throw new StorageError('UNSUPPORTED_ACTION', '不支持的操作');
+          const current = context.snapshot.occurrences[context.snapshot.activeOccurrenceId || ''];
+          await this.operation(context, 'StopOrDelete', { scope, occurrenceId: current?.occurrenceId });
           if (scope === 'stop') {
-            await this.projectOccurrence(context, current, false);
+            if (current) await this.projectOccurrence(context, current, false);
           } else {
-            const ids = scope === 'history' ? [...new Set(Object.values(context.snapshot.occurrences).map(item => item.carrierNoteId))] : [current.carrierNoteId];
+            const ids = [...new Set([context.meta.rootNoteId, ...Object.values(context.snapshot.occurrences).map(item => item.carrierNoteId),
+              ...context.operations.flatMap(op => op.kind === 'BindCarrier' ? [op.payload.noteId] : op.kind === 'Advance' && op.payload.next ? [op.payload.next.carrierNoteId] : [])])];
             for (const id of ids) {
               const note = await this.gateway.getNote(id);
               if (note && !note.deleted_time) await this.gateway.deleteNote(id);
@@ -906,13 +1181,36 @@ export class TaskApplication {
         await this.gateway.deleteNote(command.noteId);
         return { noteId: command.noteId };
       }
-      case 'restoreSeries': {
+      case 'dismissDetached': {
         const context = this.context(command.seriesId, true);
-        const carrier = this.requireOccurrence(context).carrierNoteId;
-        await this.requireNative(carrier);
-        await this.operation(context, 'Restore', { targetOpIds: command.targetOpIds });
+        const current = context.snapshot.occurrences[context.snapshot.activeOccurrenceId || ''];
+        if (current?.carrierNoteId !== command.noteId || (await this.gateway.getNote(command.noteId))?.is_todo)
+          return { seriesId: command.seriesId };
+        await this.operation(context, 'StopOrDelete', { scope: 'stop' });
         return { seriesId: command.seriesId };
       }
+      case 'keepOccurrence': {
+        const context = this.context(command.seriesId, true);
+        if (context.snapshot.revisionHeads.length > 1) throw new StorageError('SERIES_CONFLICT', '请先解决系列规则冲突。');
+        const selected = context.operations.find(op => op.opId === command.opId && op.kind === 'Advance');
+        if (!selected || selected.kind !== 'Advance' || !context.snapshot.conflicts.some(c => c.code === 'advance' && c.opIds.includes(selected.opId)))
+          throw new StorageError('STALE_CONFLICT', '冲突已变化，请刷新。');
+        const others = context.operations.filter((op): op is Extract<DomainOperation, { kind: 'Advance' }> => op.kind === 'Advance' && op.payload.predecessorId === selected.payload.predecessorId && op.opId !== selected.opId);
+        for (const terminalId of new Set(others.map(op => op.payload.terminalOpId)))
+          await this.operation(context, 'RewindAdvance', { occurrenceId: selected.payload.predecessorId, targetOpId: terminalId,
+            targetOpIds: others.filter(op => op.payload.terminalOpId === terminalId).map(op => op.opId) });
+        for (const other of others) {
+          const id = other.payload.next?.carrierNoteId;
+          if (!id || id === selected.payload.next?.carrierNoteId) continue;
+          const note = await this.gateway.getNote(id);
+          if (!note || note.deleted_time) continue;
+          const meta = (await this.journal.readCarriers(note)).find(row => row.seriesId === command.seriesId);
+          if (meta && !note.todo_completed && meta.creationHash === stableHash({ title: note.title, body: note.body })) await this.gateway.deleteNote(id);
+          else await this.recoveryNotice('notice.conflictRetained', note.title);
+        }
+        return { seriesId: command.seriesId };
+      }
+      case 'restoreFirstNote': return this.restoreFirstNote(command, command.requestId);
       case 'retrySeries': return this.retrySeries(command.seriesId, command.noteId);
       case 'adoptNativeDate': {
         const note = await this.requireNative(command.noteId);
@@ -958,12 +1256,14 @@ export class TaskApplication {
       throw new StorageError('FUTURE_TASK', '未来任务不能完成，请先修改计划日期。');
     }
     let evidence: PendingCompletion | undefined;
+    let newlySaved = false;
     for (const key of (await this.journal.userData.keys(note)).filter(value => value.startsWith('v3:pending:'))) {
       const candidate = await this.journal.userData.get<PendingCompletion>(note.id, key);
       if (candidate?.seriesId === carrier.meta.seriesId && candidate.occurrenceId === carrier.meta.occurrenceId &&
           !await this.journal.userData.get(note.id, `v3:pending-imported:${candidate.pendingId}`)) { evidence = candidate; break; }
     }
     if (!evidence) {
+      newlySaved = true;
       const identity = await this.local.nextId();
       const pendingId = stableHash(['journey-pending-completion-v3', carrier.meta.seriesId, carrier.meta.occurrenceId, identity.deviceId]);
       evidence = { schemaVersion: 3, pendingId, seriesId: carrier.meta.seriesId, anchorNoteId: carrier.meta.anchorNoteId,
@@ -980,8 +1280,44 @@ export class TaskApplication {
     }
     this.native.set(note.id, note);
     this.pending.set(evidence.pendingId, { note, evidence });
+    const { note: anchor, status } = await this.readAnchor(evidence.seriesId, evidence.anchorNoteId);
+    const title = anchor?.title || note.title;
+    if (newlySaved && (!anchor || anchor.deleted_time)) await this.recoveryNotice(anchor ? 'notice.completionWaiting' : 'notice.completionGone', title,
+      anchor?.deleted_time && !anchor.encryption_applied && !anchor.is_conflict && status && status !== 'ended'
+        ? { noteId: evidence.anchorNoteId, seriesId: evidence.seriesId } : undefined);
     return { noteId: note.id, seriesId: evidence.seriesId, code: 'ANCHOR_MISSING_PENDING',
-      message: '当前完成已保存，下一周期尚未生成。恢复首篇任务后，请点击重试推进。' };
+      message: createTranslator(await this.interfaceLocale())(anchor ? 'notice.completionWaiting' : 'notice.completionGone', { title }) };
+  }
+
+  private async restoreFirstNote(target: RestoreFirstTarget, requestId: string): Promise<Partial<ActionResult>> {
+    if (!target.noteId || typeof target.noteId !== 'string' || !target.seriesId || typeof target.seriesId !== 'string')
+      throw new StorageError('RESTORE_FIRST_INVALID', '这篇笔记已不属于原系列，未执行恢复。');
+    const note = await this.gateway.getNote(target.noteId);
+    if (!note) throw new StorageError('RESTORE_FIRST_MISSING', '第一篇任务笔记已永久删除，无法恢复。请新建重复任务替代。');
+    if (note.encryption_applied || note.is_conflict) throw new StorageError('NOTE_UNAVAILABLE', '第一篇任务笔记暂不可用，请先在 Joplin 中处理。');
+    const context = this.series.get(target.seriesId);
+    if (context?.snapshot.status === 'ended') throw new StorageError('RESTORE_FIRST_ENDED', '系列已结束，无需恢复第一篇来继续生成任务。');
+    const isCurrent = context?.snapshot.occurrences[context.snapshot.activeOccurrenceId || '']?.carrierNoteId === note.id;
+    if (target.convert && context && isCurrent) {
+      await this.projectOccurrence(context, this.requireOccurrence(context), true, requestId);
+      return { noteId: note.id, seriesId: target.seriesId };
+    }
+    if (!isCurrent) {
+      const meta = await this.journal.userData.fromNote<ControlMeta>(note, scopeKey(target.seriesId));
+      if (meta?.schemaVersion !== 3 || meta.role !== 'series' || meta.seriesId !== target.seriesId || meta.rootNoteId !== note.id)
+        throw new StorageError('RESTORE_FIRST_INVALID', '这篇笔记已不属于原系列，未执行恢复。');
+      const operations = await this.journal.operations<DomainOperation>(note, target.seriesId);
+      if (!operations.some(op => op.kind === 'CreateSeries' && op.payload.first.carrierNoteId === note.id))
+        throw new StorageError('RESTORE_FIRST_INVALID', '这篇笔记已不属于原系列，未执行恢复。');
+      if (reduceSeries(operations).status === 'ended') throw new StorageError('RESTORE_FIRST_ENDED', '系列已结束，无需恢复第一篇来继续生成任务。');
+    }
+    if (!availableFolders(await this.gateway.folders()).some(folder => folder.id === note.parent_id))
+      throw new StorageError('RESTORE_FIRST_NOTEBOOK', '原笔记本也已删除。请先在 Joplin 中恢复原笔记本，再恢复第一篇任务笔记。');
+    const restored = note.deleted_time ? await this.gateway.restoreNote(note.id) : note;
+    if (!availableFolders(await this.gateway.folders()).some(folder => folder.id === restored.parent_id))
+      throw new StorageError('RESTORE_FIRST_NOTEBOOK', '原笔记本不可用，请先在 Joplin 中恢复笔记本或选择有效位置。');
+    // The normal command refresh will import pending completions and reuse existing successors.
+    return { noteId: note.id, seriesId: target.seriesId };
   }
 
   private async retrySeries(seriesId: string, noteId?: string): Promise<Partial<ActionResult>> {
@@ -990,14 +1326,21 @@ export class TaskApplication {
     // Reload explicitly; a restored anchor may not have appeared in an earlier UI snapshot.
     await this.loadState();
     const context = this.series.get(seriesId);
-    if (!context) throw new StorageError('ANCHOR_MISSING', '首篇任务尚未恢复或未同步，当前完成已保留，不会创建替代首篇。');
+    if (!context) throw new StorageError('ANCHOR_MISSING', '本次完成记录已保存，恢复第一篇任务笔记后会自动继续。');
     const anchor = await this.gateway.getNote(context.meta.rootNoteId);
-    if (!anchor || anchor.deleted_time || anchor.encryption_applied) throw new StorageError('ANCHOR_MISSING', '请先恢复并同步原首篇任务，再重试推进。');
+    if (!anchor || anchor.deleted_time || anchor.encryption_applied) throw new StorageError('ANCHOR_MISSING', '第一篇任务笔记不可用，请从回收站恢复后继续。');
     context.snapshot = reduceSeries(context.operations);
-    if (['waiting', 'pausedConflict'].includes(context.snapshot.status)) throw new StorageError('SERIES_CONFLICT', '系列依赖尚未完整或有冲突，请先解决后重试推进。');
+    if (['waiting', 'pausedConflict'].includes(context.snapshot.status)) throw new StorageError('SERIES_CONFLICT', '系列依赖尚未完整或有冲突，请先解决后继续。');
     const pending = [...this.pending.values()].filter(item => item.evidence.seriesId === seriesId && (!noteId || item.evidence.noteId === noteId))
       .sort((a, b) => a.evidence.operationIdentity.opId.localeCompare(b.evidence.operationIdentity.opId));
     if (!pending.length) { await this.advanceIfNeeded(context); return { seriesId }; }
+    await this.resumePending(context, pending);
+    return { seriesId };
+  }
+
+  private async resumePending(context: SeriesContext, pending: { note: NativeNote; evidence: PendingCompletion }[]): Promise<void> {
+    const seriesId = context.meta.seriesId;
+    if (context.snapshot.status !== 'active') return;
     for (const item of pending) {
       const { evidence } = item;
       if (!context.snapshot.occurrences[evidence.occurrenceId]) throw new StorageError('PENDING_OCCURRENCE_MISSING', '首篇中的周期记录与当前任务不匹配，已保留双方内容。');
@@ -1037,7 +1380,6 @@ export class TaskApplication {
       this.pending.delete(item.evidence.pendingId);
     }
     context.warning = undefined;
-    return { seriesId, code: 'SERIES_RETRY_SAVED', message: '待推进完成记录已恢复，下一周期按规则推进一次。' };
   }
 
   private checkDefinition(definition: SeriesDefinition): void {
@@ -1049,8 +1391,9 @@ export class TaskApplication {
     if (errors.length) throw new StorageError('INVALID_RULE', errors.join('；'));
   }
 
-  private async validateNotebook(notebookId: string): Promise<void> {
-    if (!(await this.gateway.folders()).some(folder => folder.id === notebookId)) throw new StorageError('NOTEBOOK_MISSING', '请选择有效的目标笔记本。');
+  private async validateNotebook(notebookId: string, seriesDestination = false): Promise<void> {
+    if (!availableFolders(await this.gateway.folders()).some(folder => folder.id === notebookId)) throw new StorageError(seriesDestination ? 'SERIES_NOTEBOOK_MISSING' : 'NOTEBOOK_MISSING', seriesDestination
+      ? '系列的生成笔记本不可用。请在“修改重复规则”中选择有效的系列笔记本，保存后会自动继续。' : '请选择有效的目标笔记本。');
   }
 
   private isFuture(schedule: Schedule | undefined, at: number): boolean {
@@ -1070,16 +1413,7 @@ export class TaskApplication {
   }
   private async reopenCycle(context: SeriesContext, occurrence: Occurrence): Promise<void> {
     if (occurrence.resolution === 'open') return;
-    const snapshot = context.snapshot;
-    const edge = snapshot.advances[occurrence.occurrenceId];
-    const latest = edge && (!edge.next || edge.next.occurrenceId === snapshot.activeOccurrenceId);
-    if (latest) {
-      const targets = context.operations.filter(op => op.kind === 'Advance' && op.payload.predecessorId === occurrence.occurrenceId).map(op => op.opId);
-      await this.operation(context, 'RewindAdvance', { targetOpIds: targets, occurrenceId: occurrence.occurrenceId, targetOpId: occurrence.terminalOpId! });
-      if (edge.next) for (const intent of await this.local.all()) if (intent.create?.noteId === edge.next.carrierNoteId)
-        await this.local.put({ ...intent, phase: 'carrier-saved', create: undefined });
-    }
-    if (!latest) await this.operation(context, 'ActOccurrence', undoOccurrence(context.snapshot, occurrence.occurrenceId));
+    await this.operation(context, 'ActOccurrence', undoOccurrence(context.snapshot, occurrence.occurrenceId));
 
   }
 
@@ -1144,8 +1478,7 @@ export class TaskApplication {
     this.assertPriority(input.priority);
     if (input.recurrence) { const errors = validateRule(input.recurrence); if (errors.length) throw new StorageError('INVALID_RULE', errors.join('；')); }
     if (input.mode && !['continuous', 'archive'].includes(input.mode)) throw new StorageError('INVALID_MODE', '无效的重复模式。');
-    const folders = await this.gateway.folders();
-    if (!folders.some(folder => folder.id === input.notebookId)) throw new StorageError('NOTEBOOK_MISSING', '请选择有效的目标笔记本。');
+    await this.validateNotebook(input.notebookId);
     const schedule = this.normalizeSchedule(input.schedule);
     this.validateReminder(input.reminder, schedule);
     if (input.recurrence?.calendar === 'lunar' && schedule.kind !== 'none') this.calendar.lunar.fromSolar(schedule.date);
@@ -1239,7 +1572,7 @@ export class TaskApplication {
     return { seriesId, noteId };
   }
 
-  private async revise(context: SeriesContext, input: SeriesDefinition, currentSchedule?: DatedSchedule, moveSeries = false): Promise<void> {
+  private async revise(context: SeriesContext, input: SeriesDefinition, currentSchedule?: DatedSchedule, moveSeries = false): Promise<DatedSchedule | undefined> {
     const existing = context.snapshot.definition;
     if (!existing) throw new StorageError('SERIES_MISSING', '系列定义不可用。');
     const moving = moveSeries || input.sourceNotebookId !== existing.sourceNotebookId;
@@ -1249,12 +1582,38 @@ export class TaskApplication {
     definition.anchor = this.normalizeSchedule(definition.anchor) as DatedSchedule;
     this.checkDefinition(definition);
     delete definition.templateRevisionId;
-    if (definition.modeForNext === 'archive') {
-      await this.prepareArchiveSource(context.meta.seriesId);
+    const requestedDisplay = currentSchedule ? this.normalizeSchedule(currentSchedule) as DatedSchedule : undefined;
+    const occurrence = context.snapshot.occurrences[context.snapshot.activeOccurrenceId || ''];
+    const history = Object.values(context.snapshot.occurrences).filter(row => !row.withdrawn && (row.consumed || row.resolution !== 'open'))
+      .sort((a, b) => a.carrierGeneration - b.carrierGeneration);
+    const lastDate = history.map(row => row.scheduled.date).sort().at(-1);
+    const anchorChanged = stableStringify(existing.anchor) !== stableStringify(definition.anchor);
+    const terminalEdge = !occurrence ? Object.values(context.snapshot.advances).find(edge => edge.next === null) : undefined;
+    const terminalDefinition = terminalEdge && context.operations.find(op =>
+      ['CreateSeries', 'ReviseSeries', 'ResolveSeriesConflict'].includes(op.kind) && op.opId === terminalEdge.ruleRevisionId);
+    const previous = terminalDefinition && 'definition' in terminalDefinition.payload ? terminalDefinition.payload.definition : existing;
+    // A failed continuation can be retried after its definition was already saved.
+    const recurrenceChanged = anchorChanged || stableStringify(existing.rule) !== stableStringify(definition.rule) ||
+      (!occurrence && (stableStringify(previous.anchor) !== stableStringify(definition.anchor) || stableStringify(previous.rule) !== stableStringify(definition.rule)));
+    if (anchorChanged && lastDate && definition.anchor.date < lastDate)
+      throw new StorageError('SERIES_ANCHOR_HISTORY', '基准日期不能早于最后一期历史的日期。');
+    let generated: DatedSchedule | undefined;
+    if (recurrenceChanged) {
+      generated = revisedPeriodCandidate(definition, history, this.calendar,
+        context.snapshot.consumedCount + (occurrence && !occurrence.consumed && occurrence.resolution !== 'open' ? 1 : 0))?.schedule;
+      const retiresCurrent = occurrence?.resolution === 'open';
+      const end = definition.rule.end, oldEnd = existing.rule.end;
+      const tighteningEnd = end.kind === 'count' && oldEnd.kind === 'count' && end.count < oldEnd.count ||
+        end.kind === 'until' && oldEnd.kind === 'until' && end.date < oldEnd.date;
+      if (!generated && !retiresCurrent && !tighteningEnd) throw new StorageError('SERIES_NO_DATE', '新规则没有可生成的日期，请调整基准日期、次数或截止日期。');
     }
-    const occurrence = this.requireOccurrence(context);
+    if (!occurrence && generated && definition.modeForNext === 'continuous') {
+      const predecessor = history.find(row => context.snapshot.advances[row.occurrenceId]?.next === null);
+      if (predecessor) await this.requireNative(predecessor.carrierNoteId);
+    }
     const schedule = ruleRevisionSchedule(this.calendar,
-      currentSchedule ? this.normalizeSchedule(currentSchedule) as DatedSchedule : undefined);
+      occurrence?.resolution === 'open' ? generated : undefined);
+    if (definition.modeForNext === 'archive') await this.prepareArchiveSource(context.meta.seriesId);
     // Save the exact membership before committing the rule so a crash can resume the move.
     const move: LocalIntent | undefined = moving ? {
       id: `series-move:${identity.opId}`, controlNoteId: context.noteId, phase: 'series-move',
@@ -1265,12 +1624,24 @@ export class TaskApplication {
           ...context.operations.flatMap(op => op.kind === 'BindCarrier' ? [op.payload.noteId] : [])])] },
     } : undefined;
     if (move) await this.local.put(move);
-    await this.operation(context, 'ReviseSeries', { definition, ...(schedule ? { current: { occurrenceId: occurrence.occurrenceId, schedule, slotKey: candidateSlotKey(definition, schedule), clearDeferred: true } } : {}) }, identity);
-    if (existing.reminder.enabled !== definition.reminder.enabled ||
-      (existing.reminder.allDayTime || '09:00') !== (definition.reminder.allDayTime || '09:00')) {
+    await this.operation(context, 'ReviseSeries', { definition, ...(schedule && occurrence?.resolution === 'open' ? { current: { occurrenceId: occurrence.occurrenceId, schedule, slotKey: candidateSlotKey(definition, schedule), clearDeferred: true } } : {}) }, identity);
+    if (requestedDisplay && occurrence?.resolution === 'open')
+      await this.operation(context, 'ActOccurrence', { action: 'defer', occurrenceId: occurrence.occurrenceId, schedule: requestedDisplay });
+    if (recurrenceChanged && !generated && occurrence?.resolution === 'open') {
+      await this.operation(context, 'ActOccurrence', { action: 'skip', occurrenceId: occurrence.occurrenceId, at: this.now() });
+      await this.projectOccurrence(context, context.snapshot.occurrences[occurrence.occurrenceId]!, false);
+      await this.advanceIfNeeded(context);
+    }
+    if (occurrence && (existing.reminder.enabled !== definition.reminder.enabled ||
+      (existing.reminder.allDayTime || '09:00') !== (definition.reminder.allDayTime || '09:00'))) {
       await this.operation(context, 'ActOccurrence', { action: 'snooze', occurrenceId: occurrence.occurrenceId, until: null });
     }
     if (move) await this.finishSeriesMove(context, move);
+    if (!occurrence && generated) {
+      const predecessor = history.find(row => context.snapshot.advances[row.occurrenceId]?.next === null);
+      if (predecessor) await this.advanceIfNeeded(context, predecessor, generated);
+    }
+    return generated;
   }
 
   private async finishSeriesMove(context: SeriesContext, intent: LocalIntent): Promise<void> {
@@ -1282,7 +1653,12 @@ export class TaskApplication {
       await this.validateNotebook(move.notebookId);
       for (const noteId of move.noteIds) {
         const note = await this.gateway.getNote(noteId);
-        if (!note) throw new Error('系列笔记缺失或尚未同步，请恢复或同步后刷新重试。');
+        if (!note) {
+          const unfinished = context.operations.some(op => op.kind === 'Advance' && op.payload.candidateNoteId === noteId) &&
+            !context.operations.some(op => op.kind === 'BindCarrier' && op.payload.noteId === noteId);
+          if (unfinished) continue; // Its journaled creation will use the revised series destination.
+          throw new Error('系列笔记缺失或尚未同步，请恢复或同步后刷新重试。');
+        }
         if (note.deleted_time) continue; // Never restore deleted history as part of a move.
         if (note.encryption_applied || note.is_conflict) throw new Error('系列笔记尚不可用，请同步后刷新重试。');
         if (note.parent_id !== move.notebookId) await this.gateway.patchNote(noteId, { parent_id: move.notebookId });
@@ -1298,7 +1674,7 @@ export class TaskApplication {
     // Only current-schema, durable child-creation intents authorize POST. Never recreate a missing anchor.
     for (const intent of await this.local.all()) {
       if (intent.storageVersion !== 3 || !intent.create || !['carrier-create', 'carrier-created'].includes(intent.phase) || intent.create.role !== 'carrier' || !intent.sourceOpId) continue;
-      if (intent.attempts >= 3) { this.addDiagnostic('RECOVERY_RETRY_LIMIT', '创建恢复已暂停，请检查同步或手动重试。', undefined, intent.create.noteId); continue; }
+      let recoveringSeriesId: string | undefined;
       try {
         const anchor = await this.gateway.getNote(intent.controlNoteId);
         if (!anchor || anchor.deleted_time || anchor.encryption_applied || anchor.is_conflict) continue;
@@ -1321,16 +1697,30 @@ export class TaskApplication {
           const source = operations.find(operation => operation.opId === intent.sourceOpId && operation.kind === 'Advance');
           if (!source || source.kind !== 'Advance') continue;
           const snapshot = reduceSeries(operations);
-          if (snapshot.status === 'waiting' || snapshot.status === 'pausedConflict') break;
+          if (snapshot.status !== 'active') break;
           context = { noteId: authority.note.id, meta: authority.meta, operations, snapshot }; advance = source;
           break;
         }
         if (!context || !advance?.payload.next) continue;
+        recoveringSeriesId = context.meta.seriesId;
         const liveEdge = context.snapshot.advances[advance.payload.predecessorId];
         if (context.snapshot.occurrences[advance.payload.next.occurrenceId]?.withdrawn || !liveEdge || liveEdge.terminalOpId !== advance.payload.terminalOpId || liveEdge.next?.carrierNoteId !== intent.create.noteId) { await this.local.put({ ...intent, phase: 'carrier-saved', create: undefined }); continue; }
         const { _tagIds, _creationHash, ...rawInput } = intent.create.input;
         const input = rawInput as { title: string; body: string; parent_id: string; is_todo?: number; todo_due?: number; todo_completed?: number };
-        const recovered = intent.phase === 'carrier-created' ? await this.requireNative(intent.create.noteId) : await this.gateway.ensureNote(intent.create.noteId, input);
+        const existing = await this.gateway.getNote(intent.create.noteId);
+        let recovered: NativeNote;
+        if (existing) {
+          if (existing.deleted_time || existing.encryption_applied || existing.is_conflict) throw new StorageError('NOTE_UNAVAILABLE', '待接续的任务笔记不可用，不会重复创建。');
+          const expectedHash = typeof _creationHash === 'string' ? _creationHash : stableHash({ title: input.title, body: input.body });
+          if (stableHash({ title: existing.title, body: existing.body }) !== expectedHash || !existing.is_todo)
+            throw new StorageError('CREATION_CHANGED', '生成笔记已被修改，已保留内容并暂停恢复。');
+          recovered = existing; // Moving the already-created note does not invalidate its identity.
+        } else {
+          if (intent.phase === 'carrier-created') throw new StorageError('NOTE_UNAVAILABLE', '已生成的任务笔记已删除，不会自动重建。');
+          input.parent_id = context.snapshot.definition?.sourceNotebookId || input.parent_id;
+          await this.validateNotebook(input.parent_id, true);
+          recovered = await this.gateway.ensureNote(intent.create.noteId, input);
+        }
         const creationHash = typeof _creationHash === 'string' ? _creationHash : stableHash({ title: recovered.title, body: recovered.body });
         if (stableHash({ title: recovered.title, body: recovered.body }) !== creationHash) throw new StorageError('CREATION_CHANGED', '生成笔记已被修改，已保留内容并暂停恢复。');
         // A successful native readback ends the temporary body-bearing creation phase.
@@ -1338,7 +1728,8 @@ export class TaskApplication {
         await this.local.put(bodyFreeIntent);
         const next = advance.payload.next;
         await this.gateway.addTags(recovered.id, Array.isArray(_tagIds) ? _tagIds as string[] : context.snapshot.definition?.sourceTagIds || []);
-        const meta = this.carrierMeta(context, next, stableHash({ title: recovered.title, body: recovered.body }));
+        const meta = (await this.journal.readCarriers(recovered)).find(row => row.seriesId === context.meta.seriesId && row.occurrenceId === next.occurrenceId && row.creationHash === creationHash)
+          ?? this.carrierMeta(context, next, creationHash);
         await this.journal.writeCarrier(recovered.id, meta);
         if (!context.operations.some(op => op.kind === 'BindCarrier' && op.payload.occurrenceId === next.occurrenceId && op.payload.noteId === recovered.id)) {
           await this.operation(context, 'BindCarrier', { occurrenceId: next.occurrenceId, noteId: recovered.id, creationHash: meta.creationHash, generation: next.carrierGeneration });
@@ -1347,18 +1738,21 @@ export class TaskApplication {
       } catch (error) {
         const latest = (await this.local.all()).find(item => item.id === intent.id) || intent;
         await this.local.put({ ...latest, attempts: latest.attempts + 1, lastError: errorMessage(error) });
-        this.addDiagnostic('CREATE_RECOVERY', errorMessage(error), undefined, intent.create.noteId);
+        this.addDiagnostic(error instanceof StorageError ? error.code : 'CREATE_RECOVERY', errorMessage(error), recoveringSeriesId, intent.create.noteId);
       }
     }
   }
 
-  private async advanceIfNeeded(context: SeriesContext): Promise<void> {
-    const snapshot = context.snapshot;
+  private async advanceIfNeeded(context: SeriesContext, resume?: Occurrence, schedule?: DatedSchedule): Promise<void> {
+    // Supersede the terminal edge; keep its completion, history and cumulative count.
+    const snapshot = resume ? { ...context.snapshot, status: 'active' as const,
+      activeOccurrenceId: resume.occurrenceId, consumedCount: context.snapshot.consumedCount - 1,
+      occurrences: { ...context.snapshot.occurrences, [resume.occurrenceId]: { ...resume, consumed: false } } } : context.snapshot;
     if (snapshot.status !== 'active' || !snapshot.definition || !snapshot.activeOccurrenceId) return;
     const occurrence = snapshot.occurrences[snapshot.activeOccurrenceId];
     if (!occurrence || occurrence.consumed || occurrence.resolution === 'open') return;
     const identity = await this.local.nextId();
-    const advance = planAdvance(snapshot, occurrence.resolvedAt || this.now(), this.calendar, identity.opId);
+    const advance = planAdvance(snapshot, occurrence.resolvedAt || this.now(), this.calendar, identity.opId, schedule);
     if (advance.next && advance.candidateNoteId) {
       const retained = snapshot.occurrences[advance.next.occurrenceId];
       if (retained?.withdrawn && retained.mode === advance.next.mode && stableStringify(retained.scheduled) === stableStringify(advance.next.scheduled)) {
@@ -1376,7 +1770,7 @@ export class TaskApplication {
       advance.templateContentHash = verified.sourceHash;
       const source = await this.requireNative(context.meta.rootNoteId);
       const tags = await this.gateway.noteTags(source.id);
-      await this.validateNotebook(snapshot.definition.sourceNotebookId);
+      await this.validateNotebook(snapshot.definition.sourceNotebookId, true);
       const input = { title: this.seriesTitle(context, verified.title), body: verified.body, parent_id: snapshot.definition.sourceNotebookId, is_todo: 1, todo_due: 0, todo_completed: 0 };
       createIntent = { id: `create:${identity.opId}`, controlNoteId: context.noteId, phase: 'carrier-create', sourceOpId: identity.opId,
         create: { noteId: advance.candidateNoteId, input, role: 'carrier' }, updatedAt: this.now(), attempts: 0 };
@@ -1424,7 +1818,7 @@ export class TaskApplication {
       schemaVersion: 3, seriesId: context.meta.seriesId, occurrenceId: occurrence.occurrenceId, consumed: true,
     });
   }
-  private async projectOccurrence(context: SeriesContext, occurrence: Occurrence, active: boolean): Promise<void> {
+  private async projectOccurrence(context: SeriesContext, occurrence: Occurrence, active: boolean, restoreRequestId?: string): Promise<void> {
     const definition = context.snapshot.definition;
     if (!definition) return;
     const carrierOwner = Object.values(context.snapshot.occurrences).filter(o => !o.withdrawn && o.carrierNoteId === occurrence.carrierNoteId)
@@ -1432,10 +1826,11 @@ export class TaskApplication {
     if (carrierOwner && carrierOwner.occurrenceId !== occurrence.occurrenceId && carrierOwner.carrierNoteId === occurrence.carrierNoteId) return;
     const after = occurrenceNativeFields(occurrence, definition, this.calendar, active);
     const native = await this.requireNative(occurrence.carrierNoteId);
+    if (!native.is_todo && occurrence.consumed && occurrence.occurrenceId !== context.snapshot.activeOccurrenceId) return;
     const known = context.snapshot.projections;
     if (sameNative(native, after) && known.some(projection => projection.noteId === native.id && projection.carrierGeneration === occurrence.carrierGeneration && sameNative(projection.after, after) && projection.readbackHash)) return;
     const updated = await this.projector.execute({ noteId: native.id, occurrenceId: occurrence.occurrenceId,
-      carrierGeneration: occurrence.carrierGeneration, sourceOpId: this.semanticSource(context), phase: `occurrence:${occurrence.occurrenceId}:${stableHash(after)}:${stableHash(context.operations.filter(op => !['ProjectionIntent', 'ProjectionReceipt', 'ObserveNative'].includes(op.kind)).map(op => op.opId).sort())}`,
+      carrierGeneration: occurrence.carrierGeneration, sourceOpId: this.semanticSource(context), phase: `occurrence:${occurrence.occurrenceId}:${stableHash(after)}:${stableHash(context.operations.filter(op => !['ProjectionIntent', 'ProjectionReceipt', 'ObserveNative'].includes(op.kind)).map(op => op.opId).sort())}${restoreRequestId ? `:restore:${restoreRequestId}` : ''}`,
       knownProjections: known, append: async (kind, payload) => { await this.operation(context, kind, payload); } }, after);
     this.native.set(updated.id, updated);
   }
@@ -1461,8 +1856,43 @@ export class TaskApplication {
     }
     if (pending) this.addDiagnostic('SERIES_RENAME_PENDING', `系列名称已保存，仍有 ${pending} 篇笔记待更新；请同步或恢复可用状态后刷新重试。`, context.meta.seriesId);
   }
+  /** A journaled Advance without BindCarrier is an unfinished creation, not a deleted bound task. */
+  private async resumeUnboundCreation(context: SeriesContext): Promise<void> {
+    const snapshot = context.snapshot;
+    if (snapshot.status !== 'active' || !snapshot.activeOccurrenceId) return;
+    const current = snapshot.occurrences[snapshot.activeOccurrenceId];
+    if (!current || current.withdrawn || current.mode !== 'archive' || context.operations.some(op => op.kind === 'BindCarrier' && op.payload.occurrenceId === current.occurrenceId && op.payload.noteId === current.carrierNoteId)) return;
+    const advance = context.operations.find((op): op is Extract<DomainOperation, { kind: 'Advance' }> =>
+      op.kind === 'Advance' && op.payload.next?.occurrenceId === current.occurrenceId &&
+      op.payload.candidateNoteId === current.carrierNoteId && snapshot.advances[op.payload.predecessorId]?.terminalOpId === op.payload.terminalOpId);
+    if (!advance?.payload.templateContentHash) return;
+    const source = await this.templates.readSource(context.meta.seriesId);
+    if (source.sourceHash !== advance.payload.templateContentHash) throw new StorageError('TEMPLATE_SOURCE_CHANGED', '模板来源已变化，无法还原未完成的任务创建。');
+    const intentId = `create:${advance.opId}`;
+    if (!(await this.local.all()).some(intent => intent.id === intentId && intent.create)) {
+      await this.local.put({ id: intentId, controlNoteId: context.noteId, phase: 'carrier-create', sourceOpId: advance.opId,
+        create: { noteId: current.carrierNoteId, role: 'carrier', input: { title: this.seriesTitle(context), body: source.body,
+          parent_id: snapshot.definition!.sourceNotebookId, is_todo: 1, todo_due: 0, todo_completed: 0 } }, updatedAt: this.now(), attempts: 0 });
+    }
+    await this.recoverCreates();
+    const anchor = await this.requireNative(context.meta.rootNoteId);
+    context.operations = await this.journal.operations<DomainOperation>(anchor, context.meta.seriesId);
+    context.snapshot = reduceSeries(context.operations);
+    if (!context.operations.some(op => op.kind === 'BindCarrier' && op.payload.noteId === current.carrierNoteId && op.payload.occurrenceId === current.occurrenceId)) {
+      context.warning = this.diagnostics.find(item => item.seriesId === context.meta.seriesId)?.message;
+      context.snapshot.status = 'waiting';
+    }
+  }
+
   private async reconcileSeries(context: SeriesContext): Promise<void> {
+    if (context.snapshot.status === 'ended') {
+      await this.detectExternalSeriesChanges(context, true);
+      await this.persistSeriesLifecycle(context);
+      return;
+    }
     if (context.warning || context.snapshot.status === 'waiting' || context.snapshot.status === 'pausedConflict') return;
+    await this.resumeUnboundCreation(context);
+    if (context.warning || ['waiting'].includes(context.snapshot.status)) return;
     await this.syncSeriesTitle(context);
     const snapshot = context.snapshot;
     // Historical archive notes may be deleted without blocking the current task.
@@ -1470,10 +1900,27 @@ export class TaskApplication {
     if (active && snapshot.status !== 'ended') {
       const note = await this.gateway.getNote(active.carrierNoteId);
       if (!note || note.deleted_time || note.encryption_applied || note.is_conflict) {
+        if (active.carrierNoteId !== context.meta.rootNoteId && (!note || note.deleted_time)) {
+          if (!note) await this.operation(context, 'StopOrDelete', { scope: 'stop' });
+          else if (!this.unavailableNotices.has(note.id)) {
+            await this.recoveryNotice('notice.currentDeleted', note.title, { noteId: note.id, seriesId: snapshot.seriesId });
+            this.unavailableNotices.add(note.id);
+          }
+          if (!note) return;
+        }
         context.snapshot.status = 'waiting';
         context.warning = '执行笔记尚未同步或已删除，不会自动重建。';
         this.addDiagnostic('MISSING_CARRIER', context.warning, snapshot.seriesId, active.carrierNoteId);
         return;
+      }
+    }
+    if (active) {
+      const note = await this.gateway.getNote(active.carrierNoteId);
+      if (note?.is_todo) this.unavailableNotices.delete(note.id);
+      const end = snapshot.definition?.rule.end;
+      if (active.resolution === 'open' && (end?.kind === 'count' && snapshot.consumedCount >= end.count || end?.kind === 'until' && active.scheduled.date > end.date)) {
+        await this.operation(context, 'ActOccurrence', { action: 'skip', occurrenceId: active.occurrenceId, at: this.now() });
+        await this.projectOccurrence(context, context.snapshot.occurrences[active.occurrenceId]!, false);
       }
     }
     await this.detectExternalSeriesChanges(context);
@@ -1491,19 +1938,32 @@ export class TaskApplication {
     for (const occurrence of byCarrier.values()) {
       const note = await this.gateway.getNote(occurrence.carrierNoteId);
       if (!note || note.deleted_time || note.encryption_applied || note.is_conflict) continue;
+      if (!note.is_todo) continue;
       await this.projectOccurrence(context, occurrence, context.snapshot.status === 'active' && context.snapshot.activeOccurrenceId === occurrence.occurrenceId);
     }
   }
 
-  private async detectExternalSeriesChanges(context: SeriesContext): Promise<void> {
+  private async detectExternalSeriesChanges(context: SeriesContext, fromSnapshot = false): Promise<void> {
     const currentByNote = new Map<string, Occurrence>();
     for (const occurrence of Object.values(context.snapshot.occurrences)) {
       const prior = currentByNote.get(occurrence.carrierNoteId);
       if (!prior || occurrence.occurrenceId === context.snapshot.activeOccurrenceId || (prior.occurrenceId !== context.snapshot.activeOccurrenceId && prior.carrierGeneration < occurrence.carrierGeneration)) currentByNote.set(occurrence.carrierNoteId, occurrence);
     }
     for (const occurrence of currentByNote.values()) {
-      const note = await this.gateway.getNote(occurrence.carrierNoteId);
+      const note = fromSnapshot ? this.native.get(occurrence.carrierNoteId) : await this.gateway.getNote(occurrence.carrierNoteId);
       if (!note || note.deleted_time || note.encryption_applied || note.is_conflict) continue;
+      if (!note.is_todo && occurrence.occurrenceId !== context.snapshot.activeOccurrenceId) continue;
+      if (!note.is_todo) {
+        if (occurrence.occurrenceId !== context.snapshot.activeOccurrenceId || context.snapshot.status === 'ended') continue;
+        if (!this.unavailableNotices.has(note.id)) {
+          await this.recoveryNotice('notice.detached', note.title, { noteId: note.id, seriesId: context.meta.seriesId, convert: true });
+          this.unavailableNotices.add(note.id);
+        }
+        context.snapshot.status = 'waiting';
+        context.warning = '当前任务被转为普通笔记，后续任务暂停生成。';
+        this.addDiagnostic('NATIVE_DETACHED', context.warning, context.meta.seriesId, note.id);
+        return;
+      }
       if (occurrence.withdrawn) { if (note.todo_completed || note.todo_due) await this.gateway.patchNote(note.id, { todo_completed: 0, todo_due: 0 }); continue; }
       const projections = context.snapshot.projections.filter(projection => projection.noteId === note.id);
       const latestReceipt = [...projections].reverse().find(projection => projection.readbackHash);
@@ -1517,11 +1977,6 @@ export class TaskApplication {
       const afterHash = stableHash(nativeFields(note));
       await this.operation(context, 'ObserveNative', { noteId: note.id, occurrenceId: occurrence.occurrenceId,
         beforeHash: stableHash(baseline.after), afterHash });
-      if (!note.is_todo && baseline.after.is_todo) {
-        await this.operation(context, 'StopOrDelete', { scope: 'current', occurrenceId: occurrence.occurrenceId });
-        this.addDiagnostic('NATIVE_DETACHED', '任务被转为普通笔记，已暂停系列；不会自动转回待办。', context.meta.seriesId, note.id);
-        return;
-      }
       if ((note.todo_completed || 0) !== baseline.after.todo_completed) {
         if (note.todo_completed) await this.recordPeriodResolution(context, occurrence, 'complete', note.todo_completed);
         else if (occurrence.terminalOpId) await this.reopenCycle(context, occurrence);

@@ -23,7 +23,15 @@ export function installHostResizeGuide(view: Window = window): () => void {
   if (!token) return () => {};
   const style = host.createElement('style');
   style.setAttribute('data-journey-resize-styles', token);
+  const paneSelector = `[data-journey-main-pane="${token}"]`;
+  layout.setAttribute('data-journey-main-pane', token);
   style.textContent = `
+    ${paneSelector} { min-width:400px !important; min-height:240px !important; }
+    ${paneSelector} > div:first-child {
+      min-width:calc(100% - 5px) !important; min-height:calc(100% - 5px) !important;
+    }
+    ${paneSelector} iframe.plugin-user-webview { width:100% !important; height:100% !important; }
+
     [${marker}] {
       width:12px !important; right:-6px !important;
       z-index:10 !important; pointer-events:auto !important;
@@ -75,6 +83,39 @@ export function installHostResizeGuide(view: Window = window): () => void {
     }
     marked = handles;
   };
+  // Clamp the coordinates seen by Joplin's native resize handler as well as
+  // the rendered size. Otherwise its saved layout can shrink behind the CSS
+  // minimum, leaving an invisible dead zone when the user drags back out.
+  let drag: { minX: number; maxX: number } | undefined;
+  const forwarded = new WeakSet<Event>();
+  const beginDrag = (event: MouseEvent) => {
+    if (event.button !== 0 || !Array.from(marked).some(handle => handle.contains(event.target as Node))) return;
+    const bounds = layout.getBoundingClientRect();
+    const leftEdge = event.clientX < bounds.left + bounds.width / 2;
+    drag = leftEdge
+      ? { minX: -Infinity, maxX: event.clientX + Math.max(0, bounds.width - 400) }
+      : { minX: event.clientX - Math.max(0, bounds.width - 400), maxX: Infinity };
+  };
+  const constrainDrag = (event: MouseEvent) => {
+    if (!drag || forwarded.has(event)) return;
+    const x = Math.min(drag.maxX, Math.max(drag.minX, event.clientX));
+    if (event.type === 'mouseup') drag = undefined;
+    if (x === event.clientX) return;
+    event.stopImmediatePropagation();
+    event.preventDefault();
+    const HostMouseEvent = (hostWindow as unknown as { MouseEvent: typeof MouseEvent }).MouseEvent;
+    const replacement = new HostMouseEvent(event.type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: event.clientY,
+      screenX: event.screenX + x - event.clientX, screenY: event.screenY,
+      button: event.button, buttons: event.buttons,
+      ctrlKey: event.ctrlKey, shiftKey: event.shiftKey, altKey: event.altKey, metaKey: event.metaKey,
+    });
+    forwarded.add(replacement);
+    hostWindow.dispatchEvent(replacement);
+  };
+  hostWindow.addEventListener('mousedown', beginDrag, true);
+  hostWindow.addEventListener('mousemove', constrainDrag, true);
+  hostWindow.addEventListener('mouseup', constrainDrag, true);
   const observer = new MutationObserver(() => {
     if (!scheduled) scheduled = view.requestAnimationFrame(refresh);
   });
@@ -82,11 +123,15 @@ export function installHostResizeGuide(view: Window = window): () => void {
   observer.observe(host.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style'] });
   refresh();
   return () => {
+    hostWindow.removeEventListener('mousedown', beginDrag, true);
+    hostWindow.removeEventListener('mousemove', constrainDrag, true);
+    hostWindow.removeEventListener('mouseup', constrainDrag, true);
     observer.disconnect();
     if (scheduled) view.cancelAnimationFrame(scheduled);
     for (const handle of marked) {
       if (handle.getAttribute(marker) === token) handle.removeAttribute(marker);
     }
+    if (layout.getAttribute('data-journey-main-pane') === token) layout.removeAttribute('data-journey-main-pane');
     style.remove();
   };
 }

@@ -9,14 +9,14 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 // Opt-in real Electron integration test. Always starts its own empty profile.
 const executable = process.env.JOURNEY_JOPLIN;
-test('native Joplin divider remains visible, resizes both ways, and persists after reload', { skip: !executable, timeout: 60000 }, async () => {
+test('native Joplin divider remains visible, resizes both ways, and persists after reload', { skip: !executable, timeout: 180000 }, async () => {
   const server = createServer();
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as { port: number }).port;
   await new Promise<void>(resolve => server.close(() => resolve()));
   const profile = mkdtempSync(join(tmpdir(), 'journey-resize-'));
   writeFileSync(join(profile, 'settings.json'), JSON.stringify({
-    locale: 'en_GB', 'plugins.devPluginPaths': resolve('publish/io.journey.tasks.97d1cd8a-5ed4-4cc9-9bf8-f0b287db6cad.jpl'),
+    locale: 'en_GB', 'plugins.devPluginPaths': resolve('dist'),
     'ui.layout': { key: 'root', visible: true, children: [
       { key: 'sideBar', width: 250, visible: true }, { key: 'noteList', width: 362, visible: true },
       { key: 'editor', flexible: true, visible: true }, { key: 'chatPanel', width: 340, visible: false },
@@ -41,7 +41,7 @@ test('native Joplin divider remains visible, resizes both ways, and persists aft
   try {
     const target = await until(async () => {
       try {
-        const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json() as { type: string; url: string; webSocketDebuggerUrl: string }[];
+        const list = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) })).json() as { type: string; url: string; webSocketDebuggerUrl: string }[];
         return list.find(t => t.type === 'page' && t.url.endsWith('/index.html'));
       } catch { return undefined; }
     });
@@ -61,7 +61,8 @@ test('native Joplin divider remains visible, resizes both ways, and persists aft
     });
     const rpc = (method: string, params: object = {}): Promise<any> => new Promise((resolve, reject) => {
       const id = ++sequence;
-      pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); }, 30000);
+      pending.set(id, { resolve: value => { clearTimeout(timer); resolve(value); }, reject: error => { clearTimeout(timer); reject(error); } });
       socket!.send(JSON.stringify({ id, method, params }));
     });
     const evaluate = async (expression: string): Promise<any> => {
@@ -72,6 +73,7 @@ test('native Joplin divider remains visible, resizes both ways, and persists aft
     await rpc('Emulation.setDeviceMetricsOverride', { width: 2048, height: 1000, deviceScaleFactor: 1, mobile: false });
     const ready = () => until(async () => await evaluate("!!document.querySelector('[data-journey-resize-guide]')") ? true : undefined);
     await ready();
+    console.log('Isolated panel ready');
     const measure = () => evaluate(`(() => {
       const pane = document.querySelector('[class~="rli-plugin-view-io.journey.tasks.97d1cd8a-5ed4-4cc9-9bf8-f0b287db6cad-journey.tasks.panel"]');
       const h = document.querySelector('[data-journey-resize-guide]');
@@ -95,8 +97,8 @@ test('native Joplin divider remains visible, resizes both ways, and persists aft
       await rpc('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
       await rpc('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
       await delay(50);
-      for (let step = 1; step <= 8; step++) {
-        await rpc('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx * step / 8, y, button: 'left', buttons: 1 });
+      for (let step = 1; step <= 4; step++) {
+        await rpc('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx * step / 4, y, button: 'left', buttons: 1 });
         await delay(20);
       }
       await rpc('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x + dx, y, button: 'left', buttons: 0, clickCount: 1 });
@@ -128,7 +130,29 @@ test('native Joplin divider remains visible, resizes both ways, and persists aft
     const narrowStart = await measure(), narrowShrunk = await drag(80), narrowWidened = await drag(-60);
     assert.equal(narrowShrunk.width, narrowStart.width - 80);
     assert.equal(narrowWidened.width, narrowShrunk.width + 60);
-    const report = { baseline, start, shrunk, widened, shrunkAgain, reloaded, narrowStart, narrowShrunk, narrowWidened };
+    console.log('Checking minimum width');
+    const minimum = await drag(1000);
+    assert.equal(minimum.width, 400, 'main panel cannot shrink below its usable width');
+    const contentWidth = await evaluate(`document.querySelector('[class~="rli-plugin-view-io.journey.tasks.97d1cd8a-5ed4-4cc9-9bf8-f0b287db6cad-journey.tasks.panel"] iframe').getBoundingClientRect().width`);
+    assert.ok(contentWidth >= 390, 'webview fills the constrained panel');
+    const filterLayout = await evaluate(`(() => {
+      const frame = document.querySelector('[class~="rli-plugin-view-io.journey.tasks.97d1cd8a-5ed4-4cc9-9bf8-f0b287db6cad-journey.tasks.panel"] iframe');
+      const bar = frame.contentDocument.querySelector('.view-options');
+      return Array.from(bar.querySelectorAll(':scope > .view-option-controls > *, :scope > .view-search-controls > *')).map(element => {
+        const rect = element.getBoundingClientRect();
+        return { centerY: rect.y + rect.height / 2, right: rect.right, width: rect.width };
+      });
+    })()`);
+    const firstRow = filterLayout.slice(0, 4);
+    assert.ok(firstRow.every((item: { centerY: number }) => Math.abs(item.centerY - firstRow[0].centerY) < 1), 'options and notebook filter share the first row at 400px');
+    assert.ok(filterLayout[4].centerY > firstRow[0].centerY, 'search occupies the second row');
+    assert.equal(filterLayout[4].centerY, filterLayout[5].centerY, 'search and sort share the second row');
+    assert.equal(filterLayout[5].right - filterLayout[5].width - filterLayout[4].right, 8, 'search fills the second row up to the 8px gap before sort');
+    assert.ok(filterLayout[3].width < 144, 'notebook filter narrows to the remaining first-row space');
+    assert.ok(Math.abs(filterLayout[3].right - filterLayout[5].right) < 1, 'both rows align on the right');
+    const recovered = await drag(-100);
+    assert.ok(recovered.width > minimum.width, 'panel can grow again after reaching the minimum');
+    const report = { baseline, start, shrunk, widened, shrunkAgain, reloaded, narrowStart, narrowShrunk, narrowWidened, minimum, contentWidth, filterLayout, recovered };
     writeFileSync(resolve('tests/artifacts/panel-resize-host-check.json'), JSON.stringify(report, null, 2) + '\n');
     const screenshot = await rpc('Page.captureScreenshot', { format: 'png' });
     writeFileSync(resolve('tests/artifacts/panel-resize-host-check.png'), Buffer.from(screenshot.data, 'base64'));

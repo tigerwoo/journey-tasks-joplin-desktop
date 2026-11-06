@@ -3,7 +3,7 @@
 <p align="center">Native Joplin to-dos in task lists and calendars.<br />Gregorian and Chinese lunar recurrence, per-cycle archives, and native reminders. Edit task bodies in Joplin's own editor.</p>
 
 <p align="center">
-  <a href="https://github.com/tigerwoo/journey-tasks-joplin-desktop/releases"><img src="https://img.shields.io/badge/version-0.1.0-44cc11?style=flat-square" alt="Version 0.1.0" /></a>
+  <a href="https://github.com/tigerwoo/journey-tasks-joplin-desktop/releases"><img src="https://img.shields.io/badge/version-0.1.1-44cc11?style=flat-square" alt="Version 0.1.1" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License: MIT" /></a>
 </p>
 
@@ -49,6 +49,8 @@
 4. Enable Journey Tasks. Open Tools → Journey Tasks → Show tasks if the panel is hidden. Menu wording follows the selected interface language.
 
 Use Joplin's Change application layout command to position the panel and drag its divider to resize it. Narrow panels allow horizontal calendar scrolling.
+
+The Journey route-and-check icon in Joplin’s top note toolbar toggles the entire panel, as does Tools → Journey Tasks → Show/hide tasks. Show tasks always opens it. On desktop, the top-left double-chevron hides the main panel and shows a 32px mini rail containing only an SVG restore button, releasing space for the editor. Restoring retains your view, filters, and main panel width. The toolbar toggle hides the mini rail when collapsed and opens the full panel when shown again. Expanded, collapsed, and hidden states are saved on this device and restored after restarting Joplin; first use opens the panel. The mini rail is an independent item in Change application layout; move it separately if needed. Vertical docking uses a 36px-high restore strip. Sizing relies on Joplin’s internal layout classes and may need updates after host upgrades. Hosts without the chrome stylesheet API keep the content-only fallback.
 
 To update, install the newer `.jpl` and restart. Use the same version on all desktop devices managing a series.
 

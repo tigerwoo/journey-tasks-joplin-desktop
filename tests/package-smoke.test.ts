@@ -30,8 +30,9 @@ test('built JPL has valid portable tar headers, exactly the runtime files and ma
   const assets = [...css.matchAll(/url\(["']?(?:\.\/)?(assets\/[^)"']+)["']?\)/g)].map(match => match[1]!);
   assert.equal(assets.length, 1, 'support QR must reference a packaged file');
   assert.match(assets[0]!, /^assets\/bmc_qr-[\w-]+\.png$/);
-  assert.deepEqual(names.sort(), ['LICENSE', 'index.js', 'manifest.json', 'panel.css', 'panel.js', ...assets].sort());
-  const limits: Record<string, number> = { 'index.js': 250_000, 'panel.js': 1_150_000, 'panel.css': 40_000 };
+  assert.deepEqual(names.sort(), ['LICENSE', 'mini.css', 'mini.js', 'host.css', 'index.js', 'manifest.json', 'panel.css', 'panel.js', ...assets].sort());
+  // Native restore dialogs now include their own localized errors; the total JPL budget stays unchanged.
+  const limits: Record<string, number> = { 'index.js': 275_000, 'panel.js': 1_150_000, 'panel.css': 40_000 };
   for (const [file, limit] of Object.entries(limits)) assert.ok(readFileSync('dist/' + file).length <= limit, `${file} exceeds ${limit} bytes`);
   assert.ok(bytes.length <= 1_500_000, 'JPL exceeds 1.5 MB');
   const info = JSON.parse(readFileSync(`publish/${manifest.id}.json`, 'utf8'));
@@ -44,18 +45,27 @@ test('actual compiled plugin registers, starts against public API contract and s
   let registration: { onStart(): Promise<void> } | undefined;
   let messageHandler: ((message: unknown) => Promise<any>) | undefined;
   const scripts: string[] = []; const commands: string[] = [];
-  host.plugins = { register(value: typeof registration) { registration = value; } };
+  let chromeCssLoaded = false;
+  host.plugins = { register(value: typeof registration) { registration = value; }, installationDir: async () => 'dist' };
+  host.window = { loadChromeCssFile: async (file: string) => {
+    assert.equal(file, 'dist/host.css');
+    const css = readFileSync(file, 'utf8');
+    assert.match(css, /\.toolbar-icon\.journey-tasks-icon/);
+    assert.match(css, /data:image\/svg\+xml/);
+    chromeCssLoaded = true;
+  } };
   host.commands = { execute: async () => {}, register: async (command: any) => { commands.push(command.name); } };
   host.views = { panels: {
-    create: async () => 'test-panel', setHtml: async (_id: string, html: string) => { assert.match(html, /id="root"/); assert.doesNotMatch(html, /<!doctype|<html|<head|<body/i); },
+    create: async (id: string) => id, setHtml: async (id: string, html: string) => { assert.match(html, id.endsWith('.mini') ? /id="restore"/ : /id="root"/); assert.doesNotMatch(html, /<!doctype|<html|<head|<body/i); },
     addScript: async (_id: string, asset: string) => { assert.ok(existsSync('dist/' + asset)); scripts.push(asset); },
-    onMessage: async (_id: string, handler: typeof messageHandler) => { messageHandler = handler; },
+    onMessage: async (id: string, handler: typeof messageHandler) => { if (id.endsWith('.panel')) messageHandler = handler; },
     show: async () => {}, postMessage() {},
   } };
   runInNewContext(readFileSync('dist/index.js', 'utf8'), { joplin: host, console, Intl, Date, Math, Uint8Array, crypto: webcrypto,
     setTimeout: () => 1, clearTimeout() {} }, { timeout: 2000 });
   assert.ok(registration); await registration.onStart();
-  assert.deepEqual(scripts, ['panel.css', 'panel.js']);
+  assert.deepEqual(scripts, ['panel.css', 'panel.js', 'mini.css', 'mini.js']);
+  assert.ok(chromeCssLoaded, 'compiled plugin must load the packaged SVG toolbar icon');
   assert.ok(commands.includes('journey.completeSelected'));
   assert.ok(messageHandler);
   const response = await messageHandler({ protocolVersion: 1, requestId: 'smoke', action: 'snapshot', query: { view: 'today' } });
@@ -86,7 +96,11 @@ test('compact bundled dictionaries preserve every translation in all 26 locales 
       assert.deepEqual(JSON.parse(JSON.stringify(bundled.registry[locale].dictionary)), expected, locale);
       for (const [key, value] of Object.entries(expected)) assert.equal(bundled.createTranslator(locale)(key), value);
       assert.equal(bundled.resolveLanguage('auto', locale), locale);
-      if (keys) assert.equal(bundled.registry[locale].dictionary['settings.title'], undefined);
+      if (keys) {
+        assert.equal(bundled.registry[locale].dictionary['settings.title'], undefined);
+        for (const code of ['MISSING', 'INVALID', 'ENDED', 'NOTEBOOK', 'FAILED'])
+          assert.ok(bundled.registry[locale].dictionary[`backend.RESTORE_FIRST_${code}`], `${locale}: native restore error ${code}`);
+      }
     }
   }
 });
